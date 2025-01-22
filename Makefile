@@ -1,6 +1,6 @@
 # Important stuff
 CFLAGS = 
-LIBS = -luuid -ldxguid -ldinput -ldinput8
+LIBS = -luuid -ldxguid -ldinput -ldinput8 -lhid -lcfgmgr32
 
 # (maybe) distro-specific stuff
 MINGW32 = i686-w64-mingw32

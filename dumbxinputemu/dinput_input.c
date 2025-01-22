@@ -1,6 +1,7 @@
 #include "windef.h"
 #include "winbase.h"
 #include "winerror.h"
+#include "hidsdi.h"
 #include "dumbxinputemu.h"
 #include <cguid.h>
 #include <stdio.h>
@@ -10,10 +11,10 @@
 
 #ifndef TRACE
     // Available only in Wine
-    // #define TRACE(format, ...) do { printf("TRACE[%d] " format, __LINE__, ## __VA_ARGS__); fflush(stdout); } while (0)
-    // #define DPRINT(format, ...) do { printf("ERR[%d] " format, __LINE__, ## __VA_ARGS__); fflush(stdout); } while (0)
-    #define TRACE(...) do { } while(0)
-    #define DPRINT(...) do { } while(0)
+    #define TRACE(format, ...) do { printf("TRACE[%d] " format, __LINE__, ## __VA_ARGS__); fflush(stdout); } while (0)
+    #define DPRINT(format, ...) do { printf("ERR[%d] " format, __LINE__, ## __VA_ARGS__); fflush(stdout); } while (0)
+    // #define TRACE(...) do { } while(0)
+    // #define DPRINT(...) do { } while(0)
     #define FIXME(...) do { } while(0)
     #define WARN(...)  do { } while(0)
     #define ERR(format, ...) do { printf("ERR[%d] " format, __LINE__, ## __VA_ARGS__); fflush(stdout); } while (0)
@@ -21,7 +22,7 @@
 
 struct CapsFlags {
     BOOL wireless, jedi, pov;
-    int axes, buttons;
+    int axes, buttons, subtype;
 };
 
 static struct ControllerMap {
@@ -53,6 +54,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
 {
     HRESULT hr;
     DIPROPDWORD property;
+    DIPROPGUIDANDPATH propguidandpath;
     DIDEVCAPS dinput_caps;
     static const unsigned long wireless_products[] = {
         MAKELONG(0x045e, 0x0291) /* microsoft receiver */,
@@ -75,6 +77,11 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     property.diph.dwObj = 0;
     property.diph.dwHow = DIPH_DEVICE;
 
+    propguidandpath.diph.dwSize = sizeof(propguidandpath);
+    propguidandpath.diph.dwHeaderSize = sizeof(propguidandpath.diph);
+    propguidandpath.diph.dwObj = 0;
+    propguidandpath.diph.dwHow = DIPH_DEVICE;
+
     hr = IDirectInputDevice_GetProperty(device, DIPROP_VIDPID, &property.diph);
     if (FAILED(hr))
         return FALSE;
@@ -87,6 +94,11 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     caps->wireless = FALSE;
     caps->jedi = !!(dinput_caps.dwFlags & DIDC_FORCEFEEDBACK);
     caps->pov = !!dinput_caps.dwPOVs;
+    caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
+    if (property.dwData == MAKELONG(0x1209, 0x2882)) {
+        TRACE("Setting subtype to guitar!\n");
+        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+    }
 
     for (i = 0; i < sizeof(wireless_products) / sizeof(wireless_products[0]); i++)
         if (property.dwData == wireless_products[i])
@@ -168,11 +180,11 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
             gamepad->wButtons |= xbox_buttons[i];
 
     /* Axes */
-    gamepad->sThumbLX = js->lX;
+    gamepad->sThumbLX = js->lRx;
     gamepad->sThumbLY = -js->lY;
     if (caps->axes >= 4)
     {
-        gamepad->sThumbRX = js->lRx;
+        gamepad->sThumbRX = js->Rx;
         gamepad->sThumbRY = -js->lRy;
     }
     else
@@ -509,7 +521,7 @@ DWORD dumb_XInputGetCapabilities(DWORD index, DWORD flags,
         return ERROR_DEVICE_NOT_CONNECTED;
 
     capabilities->Type = XINPUT_DEVTYPE_GAMEPAD;
-    capabilities->SubType = XINPUT_DEVSUBTYPE_GAMEPAD;
+    capabilities->SubType = controllers[index].caps.subtype;
 
     capabilities->Flags = 0;
     if (controllers[index].caps.jedi)
