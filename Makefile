@@ -88,7 +88,7 @@ winetricks-verb:
 
 32bit: build/32/xinput1_3.dll build/32/xinput1_4.dll build/32/xinput9_1_0.dll
 
-64bit: build/64/xinput1_3.dll build/64/xinput9_1_0.dll
+64bit: build/64/xinput1_3.dll build/64/xinput1_4.dll build/64/xinput9_1_0.dll
 
 all: build/32/xinput1_1.dll build/32/xinput1_2.dll build/32/xinput1_3.dll \
 	build/32/xinput1_4.dll build/32/xinput9_1_0.dll \
