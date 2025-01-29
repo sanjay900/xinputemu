@@ -4,7 +4,7 @@ LIBS = -luuid -ldxguid -ldinput -ldinput8 -lhid -lcfgmgr32
 
 # (maybe) distro-specific stuff
 MINGW32 = i686-w64-mingw32
-MINGW64 = i686-w64-mingw32
+MINGW64 = x86_64-w64-mingw32
 BIN = /usr/bin
 USR = /usr
 LIB = lib/			# used in as ${USR}/${MINGWxy}/${LIB}
@@ -15,7 +15,7 @@ GCC32 = ${BIN}/${MINGW32}-gcc
 INCLUDE_DIR32 = -I${USR}/${MINGW32}/include -Idumbxinputemu
 LIB_DIR32 = -L{USR}/${MINGW32}/lib/
 
-GCC64 = ${BIN}/x86_64-w64-mingw32-gcc -D _WXI_MINGW
+GCC64 = ${BIN}/${MINGW64}-gcc
 INCLUDE_DIR64 = -I${USR}/${MINGW64}/include -Idumbxinputemu
 LIB_DIR64 = -L{USR}/${MINGW64}/lib/
 

@@ -39,6 +39,14 @@ DWORD WINAPI XInputGetState(
     return dumb_XInputGetState(dwUserIndex, pState, DUMBINPUT_V1_4);
 }
 
+DWORD WINAPI XInputGetStateEx(
+    _In_   DWORD dwUserIndex,
+    _Out_  XINPUT_STATE_EX *pState
+
+    ){
+    return dumb_XInputGetStateEx(dwUserIndex, pState, DUMBINPUT_V1_4);
+}
+
 DWORD WINAPI XInputSetState(
     _In_     DWORD dwUserIndex,
     _Inout_  XINPUT_VIBRATION *pVibration
