@@ -5,4 +5,5 @@ EXPORTS
  XInputGetCapabilities           @3
  XInputGetDSoundAudioDeviceGuids @4
  XInputGetState                  @5
+ XInputGetStateEx               @100
  XInputSetState                  @6

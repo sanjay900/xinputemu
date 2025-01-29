@@ -7,4 +7,5 @@ EXPORTS
  XInputGetDSoundAudioDeviceGuids @6
  XInputGetKeystroke                 @8
  XInputGetState                     @2
+ XInputGetStateEx               @100
  XInputSetState                  @3
