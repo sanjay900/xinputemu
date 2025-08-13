@@ -95,7 +95,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     caps->jedi = !!(dinput_caps.dwFlags & DIDC_FORCEFEEDBACK);
     caps->pov = !!dinput_caps.dwPOVs;
     caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
-    if (property.dwData == MAKELONG(0x1209, 0x2882)) {
+
+    if (property.dwData == MAKELONG(0x1209, 0x2882) || property.dwData == MAKELONG(0x045e, 0x028e)) {
         TRACE("Setting subtype to guitar!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
     }
@@ -178,10 +179,26 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     for (i = 0; i < buttons; i++)
         if (js->rgbButtons[i] & 0x80)
             gamepad->wButtons |= xbox_buttons[i];
+
+
+    /* Both triggers */
+    if (caps->axes >= 6)
+    {
+        gamepad->bLeftTrigger = (255 * (long)(js->lZ + 32767)) / 65535;
+        gamepad->bRightTrigger = (255 * (long)(js->lRz + 32767)) / 65535;
+    }
+    else
+        gamepad->bLeftTrigger = gamepad->bRightTrigger = 0;
+
     // Santroller guitars have whammy and slider flipped in their HID reports
     if (caps->subtype == XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE) {
         gamepad->sThumbLX = gamepad->sThumbLY = gamepad->sThumbRY = 0;
         gamepad->sThumbRX = js->lX;
+        // CRKD guitars have whammy on the Z axis (LT)
+        if (js->lZ > 50) {
+            gamepad->sThumbRX = (js->lZ / 2) + 16384;
+            gamepad->bLeftTrigger = 0;
+        }
     } else {
         /* Axes */
         gamepad->sThumbLX = js->lX;
@@ -196,15 +213,6 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
             gamepad->sThumbRX = gamepad->sThumbRY = 0;
         }
     }
-
-    /* Both triggers */
-    if (caps->axes >= 6)
-    {
-        gamepad->bLeftTrigger = (255 * (long)(js->lZ + 32767)) / 65535;
-        gamepad->bRightTrigger = (255 * (long)(js->lRz + 32767)) / 65535;
-    }
-    else
-        gamepad->bLeftTrigger = gamepad->bRightTrigger = 0;
 }
 
 
