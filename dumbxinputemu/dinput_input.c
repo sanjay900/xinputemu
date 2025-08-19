@@ -21,7 +21,7 @@
 #endif
 
 struct CapsFlags {
-    BOOL wireless, jedi, pov;
+    BOOL wireless, jedi, pov, crkd;
     int axes, buttons, subtype;
 };
 
@@ -96,9 +96,16 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     caps->pov = !!dinput_caps.dwPOVs;
     caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
 
-    if (property.dwData == MAKELONG(0x1209, 0x2882) || property.dwData == MAKELONG(0x045e, 0x028e)) {
+    if (property.dwData == MAKELONG(0x1209, 0x2882)) {
         TRACE("Setting subtype to guitar!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+    }
+
+    if (property.dwData == MAKELONG(0x045e, 0x028e)) {
+        TRACE("Setting subtype to guitar!\n");
+        TRACE("CRKD guitar detected!\n");
+        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+        caps->crkd = true;
     }
 
     for (i = 0; i < sizeof(wireless_products) / sizeof(wireless_products[0]); i++)
@@ -195,8 +202,8 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         gamepad->sThumbLX = gamepad->sThumbLY = gamepad->sThumbRY = 0;
         gamepad->sThumbRX = js->lX;
         // CRKD guitars have whammy on the Z axis (LT)
-        if (js->lZ > 50) {
-            gamepad->sThumbRX = (js->lZ / 2) + 16384;
+        if (caps->crkd) {
+            gamepad->sThumbRX = (js->lZ * 2) - 32768;
             gamepad->bLeftTrigger = 0;
         }
     } else {
