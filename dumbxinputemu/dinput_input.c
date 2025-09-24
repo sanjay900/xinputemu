@@ -101,7 +101,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
     }
 
-    if (property.dwData == MAKELONG(0x045e, 0x028e)) {
+    if (property.dwData == MAKELONG(0x045e, 0x028e) || property.dwData == MAKELONG(0x0351, 0x1000) || property.dwData == MAKELONG(0x0351, 0x2000)) {
         TRACE("Setting subtype to guitar!\n");
         TRACE("CRKD guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
