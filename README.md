@@ -5,6 +5,7 @@ This is an xinput dll reimplementation compatible with DirectInput controllers. 
 
 It currently supports santroller instruments, CRKD instruments, and any wired XInput guitars.
 
+Note that people wanting to use Xbox CRKD guitars on their linux machines will need to use https://github.com/sanjay900/xpad as the xbox crkd guitar ids are not currently in the linux kernel, but they have been submitted so in the future they should be in there.
 ##### Usage
 - download and extract the [latest release](https://github.com/sanjay900/xinputemu/releases/latest)
 - copy all xinputXYZ.dll's next to the game executable and start the game
