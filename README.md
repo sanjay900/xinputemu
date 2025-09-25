@@ -1,7 +1,9 @@
 Santroller xinput Emulator
 ====================
 
-This is an xinput dll reimplementation compatible with DirectInput controllers. Think of x360ce without the configuration.
+This is an xinput dll reimplementation compatible with DirectInput controllers. Think of x360ce without the configuration. For supported instruments, it makes sure to set the correct subtype.
+
+It currently supports santroller instruments, CRKD instruments, and any wired XInput guitars.
 
 ##### Usage
 - download and extract the [latest release](https://github.com/sanjay900/xinputemu/releases/latest)
