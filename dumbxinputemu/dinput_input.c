@@ -21,7 +21,7 @@
 #endif
 
 struct CapsFlags {
-    BOOL wireless, jedi, pov, crkd;
+    BOOL wireless, jedi, pov, crkd, santroller;
     int axes, buttons, subtype;
 };
 
@@ -98,7 +98,9 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
 
     if (property.dwData == MAKELONG(0x1209, 0x2882)) {
         TRACE("Setting subtype to guitar!\n");
+        TRACE("Santroller guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+        caps->santroller = true;
     }
 
     if (property.dwData == MAKELONG(0x045e, 0x028e) || property.dwData == MAKELONG(0x0351, 0x1000) || property.dwData == MAKELONG(0x0351, 0x2000)) {
@@ -106,6 +108,23 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         TRACE("CRKD guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
         caps->crkd = true;
+    }
+
+    if (property.dwData == MAKELONG(0x1430, 0x4734) || property.dwData == MAKELONG(0x1430, 0x4748) || property.dwData == MAKELONG(0x1430, 0x0705) || property.dwData == MAKELONG(0x1430, 0x0706)) {
+        TRACE("Setting subtype to guitar!\n");
+        TRACE("XInput guitar detected!\n");
+        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+    }
+
+    if (property.dwData == MAKELONG(0x1BAD, 0x4734) || property.dwData == MAKELONG(0x0738, 0x9806)) {
+        TRACE("Setting subtype to guitar!\n");
+        TRACE("XInput guitar detected!\n");
+        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR;
+    }
+    if (property.dwData == MAKELONG(0x1BAD, 0x0130)) {
+        TRACE("Setting subtype to drumd!\n");
+        TRACE("XInput drums detected!\n");
+        caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
     }
 
     for (i = 0; i < sizeof(wireless_products) / sizeof(wireless_products[0]); i++)
@@ -197,15 +216,15 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     else
         gamepad->bLeftTrigger = gamepad->bRightTrigger = 0;
 
-    // Santroller guitars have whammy and slider flipped in their HID reports
-    if (caps->subtype == XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE) {
+    if (caps->santroller) {
+        // Santroller guitars have whammy and slider flipped in their HID reports
         gamepad->sThumbLX = gamepad->sThumbLY = gamepad->sThumbRY = 0;
         gamepad->sThumbRX = js->lX;
+    } else if (caps->crkd) {
         // CRKD guitars have whammy on the Z axis (LT)
-        if (caps->crkd) {
-            gamepad->sThumbRX = (js->lZ * 2) - 32768;
-            gamepad->bLeftTrigger = 0;
-        }
+        gamepad->sThumbLX = gamepad->sThumbLY = gamepad->sThumbRY = 0;
+        gamepad->sThumbRX = (js->lZ * 2) - 32768;
+        gamepad->bLeftTrigger = 0;
     } else {
         /* Axes */
         gamepad->sThumbLX = js->lX;
