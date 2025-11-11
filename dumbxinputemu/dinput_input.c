@@ -131,6 +131,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         if (property.dwData == wireless_products[i])
         {
             caps->wireless = TRUE;
+			caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
             break;
         }
 
@@ -617,3 +618,4 @@ DWORD dumb_XInputGetAudioDeviceIds(DWORD dwUserIndex, LPWSTR pRenderDeviceId,
     TRACE("dumb_XInputGetAudioDeviceIds");
     return ERROR_DEVICE_NOT_CONNECTED;
 }
+
