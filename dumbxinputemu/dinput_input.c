@@ -207,28 +207,23 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         if (js->rgbButtons[i] & 0x80)
             gamepad->wButtons |= xbox_buttons[i];
 
-
-    /* Both triggers */
-    if (caps->axes >= 6)
+    if (caps->santroller)
     {
-        gamepad->bLeftTrigger = (255 * (long)(js->lZ + 32767)) / 65535;
-        gamepad->bRightTrigger = (255 * (long)(js->lRz + 32767)) / 65535;
-    }
-    else
-        gamepad->bLeftTrigger = gamepad->bRightTrigger = 0;
-
-    if (caps->santroller) {
         // Santroller guitars have whammy and slider flipped in their HID reports
         gamepad->sThumbLX = -js->lY;
         gamepad->sThumbLY = 0;
-        gamepad->sThumbRX = js->lRx;
-        gamepad->sThumbRY = js->lX;
-    } else if (caps->crkd) {
+        gamepad->sThumbRX = js->lX;
+        gamepad->sThumbRY = (js->lZ * 2) - 32768;
+    }
+    else if (caps->crkd)
+    {
         // CRKD guitars have whammy on the Z axis (LT)
         gamepad->sThumbLX = gamepad->sThumbLY = gamepad->sThumbRY = 0;
         gamepad->sThumbRX = (js->lZ * 2) - 32768;
         gamepad->bLeftTrigger = 0;
-    } else {
+    }
+    else
+    {
         /* Axes */
         gamepad->sThumbLX = js->lX;
         gamepad->sThumbLY = -js->lY;
@@ -241,6 +236,15 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         {
             gamepad->sThumbRX = gamepad->sThumbRY = 0;
         }
+
+        /* Both triggers */
+        if (caps->axes >= 6)
+        {
+            gamepad->bLeftTrigger = (255 * (long)(js->lZ + 32767)) / 65535;
+            gamepad->bRightTrigger = (255 * (long)(js->lRz + 32767)) / 65535;
+        }
+        else
+            gamepad->bLeftTrigger = gamepad->bRightTrigger = 0;
     }
 }
 
