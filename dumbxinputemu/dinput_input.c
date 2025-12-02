@@ -10,22 +10,45 @@
 #include "dinput.h"
 
 #ifndef TRACE
-    // Available only in Wine
-    #define TRACE(format, ...) do { printf("TRACE[%d] " format, __LINE__, ## __VA_ARGS__); fflush(stdout); } while (0)
-    #define DPRINT(format, ...) do { printf("ERR[%d] " format, __LINE__, ## __VA_ARGS__); fflush(stdout); } while (0)
-    // #define TRACE(...) do { } while(0)
-    // #define DPRINT(...) do { } while(0)
-    #define FIXME(...) do { } while(0)
-    #define WARN(...)  do { } while(0)
-    #define ERR(format, ...) do { printf("ERR[%d] " format, __LINE__, ## __VA_ARGS__); fflush(stdout); } while (0)
+// Available only in Wine
+#define TRACE(format, ...)                                    \
+    do                                                        \
+    {                                                         \
+        printf("TRACE[%d] " format, __LINE__, ##__VA_ARGS__); \
+        fflush(stdout);                                       \
+    } while (0)
+#define DPRINT(format, ...)                                 \
+    do                                                      \
+    {                                                       \
+        printf("ERR[%d] " format, __LINE__, ##__VA_ARGS__); \
+        fflush(stdout);                                     \
+    } while (0)
+// #define TRACE(...) do { } while(0)
+// #define DPRINT(...) do { } while(0)
+#define FIXME(...) \
+    do             \
+    {              \
+    } while (0)
+#define WARN(...) \
+    do            \
+    {             \
+    } while (0)
+#define ERR(format, ...)                                    \
+    do                                                      \
+    {                                                       \
+        printf("ERR[%d] " format, __LINE__, ##__VA_ARGS__); \
+        fflush(stdout);                                     \
+    } while (0)
 #endif
 
-struct CapsFlags {
+struct CapsFlags
+{
     BOOL wireless, jedi, pov, crkd, santroller;
     int axes, buttons, subtype;
 };
 
-static struct ControllerMap {
+static struct ControllerMap
+{
     LPDIRECTINPUTDEVICE8A device;
     BOOL connected, acquired;
     struct CapsFlags caps;
@@ -37,18 +60,17 @@ static struct ControllerMap {
     LPDIRECTINPUTEFFECT effect_instance;
 } controllers[XUSER_MAX_COUNT];
 
-static struct {
+static struct
+{
     LPDIRECTINPUT8A iface;
     BOOL enabled;
     int mapped;
 } dinput;
 
-
 /* ========================= Internal functions ============================= */
 
 static bool initialized = FALSE;
 static void dinput_start(void);
-
 
 static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags *caps)
 {
@@ -96,32 +118,37 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     caps->pov = !!dinput_caps.dwPOVs;
     caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
 
-    if (property.dwData == MAKELONG(0x1209, 0x2882)) {
+    if (property.dwData == MAKELONG(0x1209, 0x2882))
+    {
         TRACE("Setting subtype to guitar!\n");
         TRACE("Santroller guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
         caps->santroller = true;
     }
 
-    if (property.dwData == MAKELONG(0x045e, 0x028e)) {
+    if (property.dwData == MAKELONG(0x045e, 0x028e))
+    {
         TRACE("Setting subtype to guitar!\n");
         TRACE("CRKD guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
         caps->crkd = true;
     }
 
-    if (property.dwData == MAKELONG(0x1430, 0x4734) || property.dwData == MAKELONG(0x0351, 0x1000) || property.dwData == MAKELONG(0x0351, 0x2000) || property.dwData == MAKELONG(0x1430, 0x4748) || property.dwData == MAKELONG(0x1430, 0x0705) || property.dwData == MAKELONG(0x1430, 0x0706)) {
+    if (property.dwData == MAKELONG(0x1430, 0x4734) || property.dwData == MAKELONG(0x0351, 0x1000) || property.dwData == MAKELONG(0x0351, 0x2000) || property.dwData == MAKELONG(0x1430, 0x4748) || property.dwData == MAKELONG(0x1430, 0x0705) || property.dwData == MAKELONG(0x1430, 0x0706))
+    {
         TRACE("Setting subtype to guitar!\n");
         TRACE("XInput guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
     }
 
-    if (property.dwData == MAKELONG(0x1BAD, 0x4734) || property.dwData == MAKELONG(0x0738, 0x9806)) {
+    if (property.dwData == MAKELONG(0x1BAD, 0x4734) || property.dwData == MAKELONG(0x0738, 0x9806))
+    {
         TRACE("Setting subtype to guitar!\n");
         TRACE("XInput guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR;
     }
-    if (property.dwData == MAKELONG(0x1BAD, 0x0130)) {
+    if (property.dwData == MAKELONG(0x1BAD, 0x0130))
+    {
         TRACE("Setting subtype to drumd!\n");
         TRACE("XInput drums detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
@@ -131,18 +158,17 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         if (property.dwData == wireless_products[i])
         {
             caps->wireless = TRUE;
-			caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
             break;
         }
 
-    if (dinput_caps.dwAxes == 6 && dinput_caps.dwButtons == 11  && dinput_caps.dwPOVs == 1)
+    if (dinput_caps.dwAxes == 6 && dinput_caps.dwButtons == 11 && dinput_caps.dwPOVs == 1)
         TRACE("This controller has the same number of buttons/axes from xbox 360, should work...\n");
     else
         FIXME("This is not a known xbox controller, using anyway. Expect problems!\n");
 
     return TRUE;
 }
-
 
 static BOOL dinput_set_range(const LPDIRECTINPUTDEVICE8A device)
 {
@@ -162,9 +188,8 @@ static BOOL dinput_set_range(const LPDIRECTINPUTDEVICE8A device)
         WARN("Failed to set axis range (0x%x)\n", hr);
         return FALSE;
     }
-        return TRUE;
+    return TRUE;
 }
-
 
 static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepad, struct CapsFlags *caps)
 {
@@ -179,8 +204,7 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         XINPUT_GAMEPAD_START,
         XINPUT_GAMEPAD_GUIDE,
         XINPUT_GAMEPAD_LEFT_THUMB,
-        XINPUT_GAMEPAD_RIGHT_THUMB
-    };
+        XINPUT_GAMEPAD_RIGHT_THUMB};
     int i, buttons;
 
     gamepad->dwPaddingReserved = 0;
@@ -190,14 +214,26 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     {
         switch (js->rgdwPOV[0])
         {
-            case 0    : gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_UP; break;
-            case 4500 : gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_UP; /* fall through */
-            case 9000 : gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT; break;
-            case 13500: gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT; /* fall through */
-            case 18000: gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_DOWN; break;
-            case 22500: gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_DOWN; /* fall through */
-            case 27000: gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_LEFT; break;
-            case 31500: gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_UP;
+        case 0:
+            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+            break;
+        case 4500:
+            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_UP; /* fall through */
+        case 9000:
+            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+            break;
+        case 13500:
+            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT; /* fall through */
+        case 18000:
+            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+            break;
+        case 22500:
+            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_DOWN; /* fall through */
+        case 27000:
+            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+            break;
+        case 31500:
+            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_UP;
         }
     }
 
@@ -206,7 +242,6 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     for (i = 0; i < buttons; i++)
         if (js->rgbButtons[i] & 0x80)
             gamepad->wButtons |= xbox_buttons[i];
-
 
     /* Both triggers */
     if (caps->axes >= 6)
@@ -217,16 +252,23 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     else
         gamepad->bLeftTrigger = gamepad->bRightTrigger = 0;
 
-    if (caps->santroller) {
-        // Santroller guitars have whammy and slider flipped in their HID reports
-        gamepad->sThumbLX = gamepad->sThumbLY = gamepad->sThumbRY = 0;
+    if (caps->santroller)
+    {
+        // Santroller guitars have not quite correct mappings currently
+        gamepad->sThumbLX = -js->lY;
+        gamepad->sThumbLY = 0;
         gamepad->sThumbRX = js->lRx;
-        } else if (caps->crkd) {
+        gamepad->sThumbRY = js->lX;
+    }
+    else if (caps->crkd)
+    {
         // CRKD guitars have whammy on the Z axis (LT)
         gamepad->sThumbLX = gamepad->sThumbLY = gamepad->sThumbRY = 0;
         gamepad->sThumbRX = (js->lZ * 2) - 32768;
         gamepad->bLeftTrigger = 0;
-    } else {
+    }
+    else
+    {
         /* Axes */
         gamepad->sThumbLX = js->lX;
         gamepad->sThumbLY = -js->lY;
@@ -241,7 +283,6 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         }
     }
 }
-
 
 static void dinput_fill_effect(DIEFFECT *effect)
 {
@@ -258,7 +299,6 @@ static void dinput_fill_effect(DIEFFECT *effect)
     effect->rglDirection = direction;
 }
 
-
 static void dinput_send_effect(int index, int power)
 {
     HRESULT hr;
@@ -269,7 +309,7 @@ static void dinput_send_effect(int index, int power)
     if (!*instance)
         dinput_fill_effect(effect);
 
-    effect->cbTypeSpecificParams  = sizeof(periodic);
+    effect->cbTypeSpecificParams = sizeof(periodic);
     effect->lpvTypeSpecificParams = &periodic;
 
     periodic.dwMagnitude = power;
@@ -311,7 +351,6 @@ static void dinput_send_effect(int index, int power)
     }
 }
 
-
 static BOOL CALLBACK dinput_enum_callback(const DIDEVICEINSTANCEA *instance, void *context)
 {
     LPDIRECTINPUTDEVICE8A device;
@@ -330,7 +369,7 @@ static BOOL CALLBACK dinput_enum_callback(const DIDEVICEINSTANCEA *instance, voi
         // Skip 'event' devices if asked to
         if (strstr(instance->tszProductName, "(event)") != NULL)
             return DIENUM_CONTINUE;
-	}
+    }
 
     if (dinput.mapped == sizeof(controllers) / sizeof(*controllers))
         return DIENUM_STOP;
@@ -358,7 +397,6 @@ static BOOL CALLBACK dinput_enum_callback(const DIDEVICEINSTANCEA *instance, voi
     return DIENUM_CONTINUE;
 }
 
-
 static void dinput_start(void)
 {
     HRESULT hr;
@@ -385,15 +423,14 @@ static void dinput_start(void)
     dinput.enabled = TRUE;
 }
 
-
 static void dinput_update(int index)
 {
     HRESULT hr;
     DIJOYSTATE2 data;
     XINPUT_GAMEPAD_EX gamepad;
-    
+
     DPRINT("dinput_update: %d\n", index);
-    
+
     if (dinput.enabled)
     {
         if (!controllers[index].acquired)
@@ -429,7 +466,6 @@ static void dinput_update(int index)
     }
 }
 
-
 void dumb_Init(DWORD version)
 {
     // Does nothing
@@ -437,7 +473,7 @@ void dumb_Init(DWORD version)
 
 void dumb_Cleanup()
 {
-	// Does nothing as well
+    // Does nothing as well
 }
 
 /* ============================ Dll Functions =============================== */
@@ -450,7 +486,7 @@ DWORD dumb_XInputGetState(DWORD index, XINPUT_STATE *state, DWORD caller_version
         XINPUT_STATE_EX state_ex;
     } xinput;
     DWORD ret;
-    
+
     TRACE("dumb_XInputGetState: %d\n", index);
 
     ret = dumb_XInputGetStateEx(index, &xinput.state_ex, caller_version);
@@ -463,7 +499,6 @@ DWORD dumb_XInputGetState(DWORD index, XINPUT_STATE *state, DWORD caller_version
 
     return ERROR_SUCCESS;
 }
-
 
 DWORD dumb_XInputGetStateEx(DWORD index, XINPUT_STATE_EX *state_ex, DWORD caller_version)
 {
@@ -486,7 +521,6 @@ DWORD dumb_XInputGetStateEx(DWORD index, XINPUT_STATE_EX *state_ex, DWORD caller
 
     return ERROR_SUCCESS;
 }
-
 
 DWORD dumb_XInputSetState(DWORD index, XINPUT_VIBRATION *vibration, DWORD caller_version)
 {
@@ -519,7 +553,6 @@ DWORD dumb_XInputSetState(DWORD index, XINPUT_VIBRATION *vibration, DWORD caller
     return ERROR_SUCCESS;
 }
 
-
 void dumb_XInputEnable(BOOL enable)
 {
     /* Setting to false will stop messages from XInputSetState being sent
@@ -545,11 +578,11 @@ void dumb_XInputEnable(BOOL enable)
 
 /* Not defined anywhere ??? */
 #define XINPUT_CAPS_FFB_SUPPORTED 0x0001
-#define XINPUT_CAPS_WIRELESS      0x0002
+#define XINPUT_CAPS_WIRELESS 0x0002
 #define XINPUT_CAPS_NO_NAVIGATION 0x0010
 
 DWORD dumb_XInputGetCapabilities(DWORD index, DWORD flags,
-        XINPUT_CAPABILITIES *capabilities, DWORD caller_version)
+                                 XINPUT_CAPABILITIES *capabilities, DWORD caller_version)
 {
     TRACE("dumb_XInputGetCapabilities (%u %d %p)\n", index, flags, capabilities);
     if (!initialized)
@@ -577,9 +610,8 @@ DWORD dumb_XInputGetCapabilities(DWORD index, DWORD flags,
     return ERROR_SUCCESS;
 }
 
-
-DWORD dumb_XInputGetDSoundAudioDeviceGuids(DWORD dwUserIndex, GUID* pDSoundRenderGuid,
-        GUID* pDSoundCaptureGuid, DWORD caller_version)
+DWORD dumb_XInputGetDSoundAudioDeviceGuids(DWORD dwUserIndex, GUID *pDSoundRenderGuid,
+                                           GUID *pDSoundCaptureGuid, DWORD caller_version)
 {
     TRACE("dumb_XInputGetDSoundAudioDeviceGuids");
     if (dwUserIndex > 3)
@@ -589,20 +621,18 @@ DWORD dumb_XInputGetDSoundAudioDeviceGuids(DWORD dwUserIndex, GUID* pDSoundRende
     return ERROR_SUCCESS;
 }
 
-
 DWORD dumb_XInputGetKeystroke(DWORD dwUserIndex, DWORD dwReserved,
-        PXINPUT_KEYSTROKE pKeystroke, DWORD caller_version)
+                              PXINPUT_KEYSTROKE pKeystroke, DWORD caller_version)
 {
     FIXME("(index %u, reserved %u, keystroke %p) Stub!\n", dwUserIndex,
-            dwReserved, pKeystroke);
+          dwReserved, pKeystroke);
     if (dwUserIndex > 3)
         return ERROR_DEVICE_NOT_CONNECTED;
     return ERROR_EMPTY;
 }
 
-
 DWORD dumb_XInputGetBatteryInformation(DWORD dwUserIndex, BYTE devType,
-        XINPUT_BATTERY_INFORMATION *pBatteryInformation, DWORD caller_version)
+                                       XINPUT_BATTERY_INFORMATION *pBatteryInformation, DWORD caller_version)
 {
     TRACE("dumb_XInputGetBatteryInformation");
     pBatteryInformation->BatteryLevel = BATTERY_LEVEL_FULL;
@@ -610,12 +640,10 @@ DWORD dumb_XInputGetBatteryInformation(DWORD dwUserIndex, BYTE devType,
     return ERROR_SUCCESS;
 }
 
-
 DWORD dumb_XInputGetAudioDeviceIds(DWORD dwUserIndex, LPWSTR pRenderDeviceId,
-        UINT *pRenderCount, LPWSTR pCaptureDeviceId,
-        UINT *pCaptureCount, DWORD caller_version)
+                                   UINT *pRenderCount, LPWSTR pCaptureDeviceId,
+                                   UINT *pCaptureCount, DWORD caller_version)
 {
     TRACE("dumb_XInputGetAudioDeviceIds");
     return ERROR_DEVICE_NOT_CONNECTED;
 }
-
