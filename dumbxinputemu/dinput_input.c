@@ -219,9 +219,11 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
 
     if (caps->santroller) {
         // Santroller guitars have whammy and slider flipped in their HID reports
-        gamepad->sThumbLX = gamepad->sThumbLY = gamepad->sThumbRY = 0;
+        gamepad->sThumbLX = -js->lY;
+        gamepad->sThumbLY = 0;
         gamepad->sThumbRX = js->lRx;
-        } else if (caps->crkd) {
+        gamepad->sThumbRY = js->lX;
+    } else if (caps->crkd) {
         // CRKD guitars have whammy on the Z axis (LT)
         gamepad->sThumbLX = gamepad->sThumbLY = gamepad->sThumbRY = 0;
         gamepad->sThumbRX = (js->lZ * 2) - 32768;
