@@ -110,7 +110,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         caps->crkd = true;
     }
 
-    if (property.dwData == MAKELONG(0x1430, 0x4734) || property.dwData == MAKELONG(0x0351, 0x1000) || property.dwData == MAKELONG(0x0351, 0x2000) || property.dwData == MAKELONG(0x1430, 0x4748) || property.dwData == MAKELONG(0x1430, 0x0705) || property.dwData == MAKELONG(0x1430, 0x0706)) {
+    if (property.dwData == MAKELONG(0x1430, 0x4734) || property.dwData == MAKELONG(0x3651, 0x1000) || property.dwData == MAKELONG(0x0351, 0x1000) || property.dwData == MAKELONG(0x0351, 0x2000) || property.dwData == MAKELONG(0x1430, 0x4748) || property.dwData == MAKELONG(0x1430, 0x0705) || property.dwData == MAKELONG(0x1430, 0x0706)) {
         TRACE("Setting subtype to guitar!\n");
         TRACE("XInput guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
