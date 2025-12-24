@@ -7,6 +7,7 @@
 #include <stdio.h>
 
 #define DIRECTINPUT_VERSION 0x0800
+// #define DEBUG
 #include "dinput.h"
 
 #ifndef TRACE
@@ -21,7 +22,7 @@
 #endif
 
 struct CapsFlags {
-    BOOL wireless, jedi, pov, crkd, santroller;
+    BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps3gh;
     int axes, buttons, subtype;
 };
 
@@ -110,6 +111,20 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         caps->crkd = true;
     }
 
+    if (property.dwData == MAKELONG(0x12ba, 0x0200)) {
+        TRACE("Setting subtype to guitar!\n");
+        TRACE("RB PS3 guitar detected!\n");
+        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+        caps->ps3rb = true;
+    }
+
+    if (property.dwData == MAKELONG(0x12ba, 0x0100)) {
+        TRACE("Setting subtype to guitar!\n");
+        TRACE("RB PS3 guitar detected!\n");
+        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+        caps->ps3gh = true;
+    }
+
     if (property.dwData == MAKELONG(0x1430, 0x4734) || property.dwData == MAKELONG(0x3651, 0x1000) || property.dwData == MAKELONG(0x0351, 0x1000) || property.dwData == MAKELONG(0x0351, 0x2000) || property.dwData == MAKELONG(0x1430, 0x4748) || property.dwData == MAKELONG(0x1430, 0x0705) || property.dwData == MAKELONG(0x1430, 0x0706)) {
         TRACE("Setting subtype to guitar!\n");
         TRACE("XInput guitar detected!\n");
@@ -165,6 +180,17 @@ static BOOL dinput_set_range(const LPDIRECTINPUTDEVICE8A device)
         return TRUE;
 }
 
+long map(long x, long in_min, long in_max, long out_min, long out_max) {
+    long out = (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+  if (out > out_max) {
+    out = out_max;
+  }
+  if (out < out_min) {
+    out = out_min;
+  }
+  return out;
+
+}
 
 static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepad, struct CapsFlags *caps)
 {
@@ -180,6 +206,50 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         XINPUT_GAMEPAD_GUIDE,
         XINPUT_GAMEPAD_LEFT_THUMB,
         XINPUT_GAMEPAD_RIGHT_THUMB
+    };
+    // bool blue : 1; // square
+    // bool green : 1; // cross
+    // bool red : 1; // circle
+    // bool yellow : 1; // triangle
+
+    // bool orange : 1; // l1
+    // bool tilt : 1; // r1
+    // bool solo : 1; // l2
+    // bool : 1;
+
+    // bool select : 1;
+    // bool start : 1;
+    static const int ps3_buttons[] = {
+        XINPUT_GAMEPAD_X,
+        XINPUT_GAMEPAD_A,
+        XINPUT_GAMEPAD_B,
+        XINPUT_GAMEPAD_Y,
+        XINPUT_GAMEPAD_LEFT_SHOULDER,
+        0x00, // tilt
+        0x00, // solo
+        0x00, 
+        XINPUT_GAMEPAD_BACK,
+        XINPUT_GAMEPAD_START,
+        XINPUT_GAMEPAD_RIGHT_THUMB,
+        XINPUT_GAMEPAD_GUIDE,
+        0x00
+        
+    };
+    static const int ps3_gh_buttons[] = {
+        XINPUT_GAMEPAD_Y,
+        XINPUT_GAMEPAD_A,
+        XINPUT_GAMEPAD_B,
+        XINPUT_GAMEPAD_X,
+        XINPUT_GAMEPAD_LEFT_SHOULDER,
+        0x00, // tilt
+        0x00, // solo
+        0x00, 
+        XINPUT_GAMEPAD_BACK,
+        XINPUT_GAMEPAD_START,
+        XINPUT_GAMEPAD_RIGHT_THUMB,
+        XINPUT_GAMEPAD_GUIDE,
+        0x00
+        
     };
     int i, buttons;
 
@@ -202,11 +272,22 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     }
 
     /* Buttons */
-    buttons = min(caps->buttons, sizeof(xbox_buttons) / sizeof(*xbox_buttons));
-    for (i = 0; i < buttons; i++)
-        if (js->rgbButtons[i] & 0x80)
-            gamepad->wButtons |= xbox_buttons[i];
-
+    if (caps->ps3rb) {
+        buttons = min(caps->buttons, sizeof(ps3_buttons) / sizeof(*ps3_buttons));
+        for (i = 0; i < buttons; i++)
+            if (js->rgbButtons[i] & 0x80)
+                gamepad->wButtons |= ps3_buttons[i];
+    } else if (caps->ps3gh) {
+        buttons = min(caps->buttons, sizeof(ps3_gh_buttons) / sizeof(*ps3_gh_buttons));
+        for (i = 0; i < buttons; i++)
+            if (js->rgbButtons[i] & 0x80)
+                gamepad->wButtons |= ps3_gh_buttons[i];
+    } else {
+        buttons = min(caps->buttons, sizeof(xbox_buttons) / sizeof(*xbox_buttons));
+        for (i = 0; i < buttons; i++)
+            if (js->rgbButtons[i] & 0x80)
+                gamepad->wButtons |= xbox_buttons[i];
+    }
     if (caps->santroller)
     {
         // Santroller guitars have whammy and slider flipped in their HID reports
@@ -214,6 +295,20 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         gamepad->sThumbLY = 0;
         gamepad->sThumbRX = js->lX;
         gamepad->sThumbRY = (js->lZ * 2) - 32768;
+    }
+    else if (caps->ps3rb)
+    {
+        gamepad->sThumbRX = (js->lZ);
+        if (js->rgbButtons[5] & 0x80) {
+            gamepad->sThumbRY = 32767;
+        } else {
+            gamepad->sThumbRY = 0;
+        }
+    }
+    else if (caps->ps3gh)
+    {
+        gamepad->sThumbRX = (js->lZ * 2) - 32768;
+        gamepad->sThumbRY = map(js->lRy, 8192, -8192, -32767, 32767);
     }
     else if (caps->crkd)
     {
@@ -387,6 +482,35 @@ static void dinput_start(void)
         ERR("Failed to enumerate dinput8 devices, no xinput controller support (0x%x)\n", hr);
         return;
     }
+    #ifdef DEBUG
+     CONSOLE_SCREEN_BUFFER_INFO csbi;
+
+    // Create a new console window.
+    if (!AllocConsole()) return;
+
+    // Set the screen buffer to be larger than normal (this is optional).
+    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi))
+    {
+        csbi.dwSize.Y = 1000; // any useful number of lines...
+        SetConsoleScreenBufferSize(GetStdHandle(STD_OUTPUT_HANDLE), csbi.dwSize);
+    }
+ 
+
+    // Redirect "stdin" to the console window.
+    if (!freopen("CONIN$", "w", stdin)) return;
+ 
+
+    // Redirect "stderr" to the console window.
+    if (!freopen("CONOUT$", "w", stderr)) return;
+
+    // Redirect "stdout" to the console window.
+    if (!freopen("CONOUT$", "w", stdout)) return;
+ 
+
+    // Turn off buffering for "stdout" ("stderr" is unbuffered by default).
+
+    setbuf(stdout, NULL);
+    #endif
 
     dinput.enabled = TRUE;
 }
