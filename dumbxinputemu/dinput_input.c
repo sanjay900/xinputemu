@@ -125,6 +125,12 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         caps->ps3gh = true;
     }
 
+    if (property.dwData == MAKELONG(0x045e, 0x0291)){
+        TRACE("Setting subtype to guitar!\n");
+        TRACE("wireless receiver detected!\n");
+        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+    }
+
     if (property.dwData == MAKELONG(0x1430, 0x4734) || property.dwData == MAKELONG(0x3651, 0x1000) || property.dwData == MAKELONG(0x0351, 0x1000) || property.dwData == MAKELONG(0x0351, 0x2000) || property.dwData == MAKELONG(0x1430, 0x4748) || property.dwData == MAKELONG(0x1430, 0x0705) || property.dwData == MAKELONG(0x1430, 0x0706)) {
         TRACE("Setting subtype to guitar!\n");
         TRACE("XInput guitar detected!\n");
@@ -226,7 +232,7 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         XINPUT_GAMEPAD_Y,
         XINPUT_GAMEPAD_LEFT_SHOULDER,
         0x00, // tilt
-        0x00, // solo
+        XINPUT_GAMEPAD_LEFT_THUMB, // solo
         0x00, 
         XINPUT_GAMEPAD_BACK,
         XINPUT_GAMEPAD_START,
