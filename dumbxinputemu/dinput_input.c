@@ -111,16 +111,16 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         caps->crkd = true;
     }
 
-    if (property.dwData == MAKELONG(0x12ba, 0x0200)) {
+    if (property.dwData == MAKELONG(0x12ba, 0x0200) || property.dwData == MAKELONG(0x1BAD, 0x0004) || property.dwData == MAKELONG(0x1BAD, 0x3010)) {
         TRACE("Setting subtype to guitar!\n");
         TRACE("RB PS3 guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
         caps->ps3rb = true;
     }
 
-    if (property.dwData == MAKELONG(0x12ba, 0x0100)) {
+    if (property.dwData == MAKELONG(0x12ba, 0x0100) || property.dwData == MAKELONG(0x1430, 0x474C)) {
         TRACE("Setting subtype to guitar!\n");
-        TRACE("RB PS3 guitar detected!\n");
+        TRACE("GH PS3 guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
         caps->ps3gh = true;
     }
