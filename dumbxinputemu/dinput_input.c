@@ -125,7 +125,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         caps->ps3gh = true;
     }
 
-    if (property.dwData == MAKELONG(0x045e, 0x0291)){
+    if (property.dwData == MAKELONG(0x045e, 0x0291) || property.dwData == MAKELONG(0x045e, 0x02a9)){
         TRACE("Setting subtype to guitar!\n");
         TRACE("wireless receiver detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
