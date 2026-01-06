@@ -59,7 +59,10 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     DIDEVCAPS dinput_caps;
     static const unsigned long wireless_products[] = {
         MAKELONG(0x045e, 0x0291) /* microsoft receiver */,
+        MAKELONG(0x045e, 0x02a9) /* microsoft receiver (3rd party) */,
+        MAKELONG(0x045e, 0x02a1) /* microsoft controller (xpad) */,
         MAKELONG(0x045e, 0x0719) /* microsoft controller */,
+        MAKELONG(0x28de, 0x11ff) /* steam input virtual controller */,
         MAKELONG(0x0738, 0x4556) /* mad catz */,
         MAKELONG(0x0e6f, 0x0003) /* logitech */,
         MAKELONG(0x0e6f, 0x0005) /* eclipse */,
@@ -125,12 +128,6 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         caps->ps3gh = true;
     }
 
-    if (property.dwData == MAKELONG(0x045e, 0x0291) || property.dwData == MAKELONG(0x045e, 0x02a9)){
-        TRACE("Setting subtype to guitar!\n");
-        TRACE("wireless receiver detected!\n");
-        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-    }
-
     if (property.dwData == MAKELONG(0x1430, 0x4734) || property.dwData == MAKELONG(0x3651, 0x1000) || property.dwData == MAKELONG(0x0351, 0x1000) || property.dwData == MAKELONG(0x0351, 0x2000) || property.dwData == MAKELONG(0x1430, 0x4748) || property.dwData == MAKELONG(0x1430, 0x0705) || property.dwData == MAKELONG(0x1430, 0x0706)) {
         TRACE("Setting subtype to guitar!\n");
         TRACE("XInput guitar detected!\n");
@@ -147,6 +144,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         TRACE("XInput drums detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
     }
+    TRACE("vidpid: %08x\n", property.dwData);
 
     for (i = 0; i < sizeof(wireless_products) / sizeof(wireless_products[0]); i++)
         if (property.dwData == wireless_products[i])
@@ -423,7 +421,8 @@ static BOOL CALLBACK dinput_enum_callback(const DIDEVICEINSTANCEA *instance, voi
 {
     LPDIRECTINPUTDEVICE8A device;
     HRESULT hr;
-
+    
+    TRACE("Device %s\n", instance->tszProductName);
     if (strstr(instance->tszProductName, "(js)") != NULL)
     {
         // Skip 'js' devices, use only evdev
@@ -472,22 +471,6 @@ static void dinput_start(void)
     if (initialized)
         return;
     initialized = TRUE;
-
-    hr = DirectInput8Create(GetModuleHandleA(NULL), 0x0800, &IID_IDirectInput8A,
-                            (void **)&dinput.iface, NULL);
-    if (FAILED(hr))
-    {
-        ERR("Failed to create dinput8 interface, no xinput controller support (0x%x)\n", hr);
-        return;
-    }
-
-    hr = IDirectInput8_EnumDevices(dinput.iface, DI8DEVCLASS_GAMECTRL,
-                                   dinput_enum_callback, NULL, DIEDFL_ATTACHEDONLY);
-    if (FAILED(hr))
-    {
-        ERR("Failed to enumerate dinput8 devices, no xinput controller support (0x%x)\n", hr);
-        return;
-    }
     #ifdef DEBUG
      CONSOLE_SCREEN_BUFFER_INFO csbi;
 
@@ -518,6 +501,22 @@ static void dinput_start(void)
     setbuf(stdout, NULL);
     #endif
 
+    hr = DirectInput8Create(GetModuleHandleA(NULL), 0x0800, &IID_IDirectInput8A,
+                            (void **)&dinput.iface, NULL);
+    if (FAILED(hr))
+    {
+        ERR("Failed to create dinput8 interface, no xinput controller support (0x%x)\n", hr);
+        return;
+    }
+
+    hr = IDirectInput8_EnumDevices(dinput.iface, DI8DEVCLASS_GAMECTRL,
+                                   dinput_enum_callback, NULL, DIEDFL_ATTACHEDONLY);
+    if (FAILED(hr))
+    {
+        ERR("Failed to enumerate dinput8 devices, no xinput controller support (0x%x)\n", hr);
+        return;
+    }
+
     dinput.enabled = TRUE;
 }
 
@@ -528,7 +527,7 @@ static void dinput_update(int index)
     DIJOYSTATE2 data;
     XINPUT_GAMEPAD_EX gamepad;
     
-    DPRINT("dinput_update: %d\n", index);
+    // DPRINT("dinput_update: %d\n", index);
     
     if (dinput.enabled)
     {
@@ -587,7 +586,7 @@ DWORD dumb_XInputGetState(DWORD index, XINPUT_STATE *state, DWORD caller_version
     } xinput;
     DWORD ret;
     
-    TRACE("dumb_XInputGetState: %d\n", index);
+    // TRACE("dumb_XInputGetState: %d\n", index);
 
     ret = dumb_XInputGetStateEx(index, &xinput.state_ex, caller_version);
     if (ret != ERROR_SUCCESS)
@@ -603,7 +602,7 @@ DWORD dumb_XInputGetState(DWORD index, XINPUT_STATE *state, DWORD caller_version
 
 DWORD dumb_XInputGetStateEx(DWORD index, XINPUT_STATE_EX *state_ex, DWORD caller_version)
 {
-    TRACE("dumb_XInputGetStateEx (%u %p)\n", index, state_ex);
+    // TRACE("dumb_XInputGetStateEx (%u %p)\n", index, state_ex);
 
     if (!initialized)
     {
