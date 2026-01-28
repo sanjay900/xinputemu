@@ -11,22 +11,45 @@
 #include "dinput.h"
 
 #ifndef TRACE
-    // Available only in Wine
-    #define TRACE(format, ...) do { printf("TRACE[%d] " format, __LINE__, ## __VA_ARGS__); fflush(stdout); } while (0)
-    #define DPRINT(format, ...) do { printf("ERR[%d] " format, __LINE__, ## __VA_ARGS__); fflush(stdout); } while (0)
-    // #define TRACE(...) do { } while(0)
-    // #define DPRINT(...) do { } while(0)
-    #define FIXME(...) do { } while(0)
-    #define WARN(...)  do { } while(0)
-    #define ERR(format, ...) do { printf("ERR[%d] " format, __LINE__, ## __VA_ARGS__); fflush(stdout); } while (0)
+// Available only in Wine
+#define TRACE(format, ...)                                    \
+    do                                                        \
+    {                                                         \
+        printf("TRACE[%d] " format, __LINE__, ##__VA_ARGS__); \
+        fflush(stdout);                                       \
+    } while (0)
+#define DPRINT(format, ...)                                 \
+    do                                                      \
+    {                                                       \
+        printf("ERR[%d] " format, __LINE__, ##__VA_ARGS__); \
+        fflush(stdout);                                     \
+    } while (0)
+// #define TRACE(...) do { } while(0)
+// #define DPRINT(...) do { } while(0)
+#define FIXME(...) \
+    do             \
+    {              \
+    } while (0)
+#define WARN(...) \
+    do            \
+    {             \
+    } while (0)
+#define ERR(format, ...)                                    \
+    do                                                      \
+    {                                                       \
+        printf("ERR[%d] " format, __LINE__, ##__VA_ARGS__); \
+        fflush(stdout);                                     \
+    } while (0)
 #endif
 
-struct CapsFlags {
-    BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps3gh;
+struct CapsFlags
+{
+    BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps3gh, force;
     int axes, buttons, subtype;
 };
 
-static struct ControllerMap {
+static struct ControllerMap
+{
     LPDIRECTINPUTDEVICE8A device;
     BOOL connected, acquired;
     struct CapsFlags caps;
@@ -38,18 +61,17 @@ static struct ControllerMap {
     LPDIRECTINPUTEFFECT effect_instance;
 } controllers[XUSER_MAX_COUNT];
 
-static struct {
+static struct
+{
     LPDIRECTINPUT8A iface;
     BOOL enabled;
     int mapped;
 } dinput;
 
-
 /* ========================= Internal functions ============================= */
 
 static bool initialized = FALSE;
 static void dinput_start(void);
-
 
 static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags *caps)
 {
@@ -99,47 +121,63 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     caps->jedi = !!(dinput_caps.dwFlags & DIDC_FORCEFEEDBACK);
     caps->pov = !!dinput_caps.dwPOVs;
     caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
+    caps->santroller = false;
+    caps->crkd = false;
+    caps->ps3rb = false;
+    caps->ps3gh = false;
+    caps->rb360 = false;
 
-    if (property.dwData == MAKELONG(0x1209, 0x2882)) {
+    if (property.dwData == MAKELONG(0x1209, 0x2882))
+    {
         TRACE("Setting subtype to guitar!\n");
         TRACE("Santroller guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
         caps->santroller = true;
     }
 
-    if (property.dwData == MAKELONG(0x045e, 0x028e)) {
+    if (property.dwData == MAKELONG(0x045e, 0x028e))
+    {
         TRACE("Setting subtype to guitar!\n");
         TRACE("CRKD guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
         caps->crkd = true;
     }
 
-    if (property.dwData == MAKELONG(0x12ba, 0x0200) || property.dwData == MAKELONG(0x1BAD, 0x0004) || property.dwData == MAKELONG(0x1BAD, 0x3010)) {
+    if (property.dwData == MAKELONG(0x12ba, 0x0200) || property.dwData == MAKELONG(0x1BAD, 0x0004) || property.dwData == MAKELONG(0x1BAD, 0x3010))
+    {
         TRACE("Setting subtype to guitar!\n");
         TRACE("RB PS3 guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
         caps->ps3rb = true;
     }
 
-    if (property.dwData == MAKELONG(0x12ba, 0x0100) || property.dwData == MAKELONG(0x1430, 0x474C)) {
+    if (property.dwData == MAKELONG(0x12ba, 0x0100) || property.dwData == MAKELONG(0x1430, 0x474C))
+    {
         TRACE("Setting subtype to guitar!\n");
         TRACE("GH PS3 guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
         caps->ps3gh = true;
     }
 
-    if (property.dwData == MAKELONG(0x1430, 0x4734) || property.dwData == MAKELONG(0x3651, 0x1000) || property.dwData == MAKELONG(0x0351, 0x1000) || property.dwData == MAKELONG(0x0351, 0x2000) || property.dwData == MAKELONG(0x1430, 0x4748) || property.dwData == MAKELONG(0x1430, 0x0705) || property.dwData == MAKELONG(0x1430, 0x0706)) {
+    if (property.dwData == MAKELONG(0x1430, 0x4734) || property.dwData == MAKELONG(0x3651, 0x1000) || property.dwData == MAKELONG(0x0351, 0x1000) || property.dwData == MAKELONG(0x0351, 0x2000) || property.dwData == MAKELONG(0x1430, 0x4748) || property.dwData == MAKELONG(0x1430, 0x0705) || property.dwData == MAKELONG(0x1430, 0x0706))
+    {
         TRACE("Setting subtype to guitar!\n");
-        TRACE("XInput guitar detected!\n");
+        TRACE("XInput GH guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+        // on windows, 360 guitars don't actually show every axis, so we need to skip axis count checks
+        caps->force = true;
     }
 
-    if (property.dwData == MAKELONG(0x1BAD, 0x4734) || property.dwData == MAKELONG(0x0738, 0x9806) || property.dwData == MAKELONG(0x1BAD, 0x0719) || property.dwData == MAKELONG(0x1BAD, 0x0002)) {
+    if (property.dwData == MAKELONG(0x1BAD, 0x4734) || property.dwData == MAKELONG(0x0738, 0x9806) || property.dwData == MAKELONG(0x1BAD, 0x0719) || property.dwData == MAKELONG(0x1BAD, 0x0002))
+    {
         TRACE("Setting subtype to guitar!\n");
-        TRACE("XInput guitar detected!\n");
+        TRACE("XInput RB guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+        // on windows, 360 guitars don't actually show every axis, so we need to skip axis count checks
+        caps->force = true;
     }
-    if (property.dwData == MAKELONG(0x1BAD, 0x0130)) {
+    if (property.dwData == MAKELONG(0x1BAD, 0x0130))
+    {
         TRACE("Setting subtype to drumd!\n");
         TRACE("XInput drums detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
@@ -150,18 +188,21 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         if (property.dwData == wireless_products[i])
         {
             caps->wireless = TRUE;
-			caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
             break;
         }
 
-    if (dinput_caps.dwAxes == 6 && dinput_caps.dwButtons == 11  && dinput_caps.dwPOVs == 1)
+    if (dinput_caps.dwAxes == 6 && dinput_caps.dwButtons == 11 && dinput_caps.dwPOVs == 1)
+    {
         TRACE("This controller has the same number of buttons/axes from xbox 360, should work...\n");
+        caps->rb360 = false;
+    }
     else
-        FIXME("This is not a known xbox controller, using anyway. Expect problems!\n");
-
+    {
+        TRACE("This is not a known xbox controller, using anyway. Expect problems!\n");
+    }
     return TRUE;
 }
-
 
 static BOOL dinput_set_range(const LPDIRECTINPUTDEVICE8A device)
 {
@@ -181,19 +222,21 @@ static BOOL dinput_set_range(const LPDIRECTINPUTDEVICE8A device)
         WARN("Failed to set axis range (0x%x)\n", hr);
         return FALSE;
     }
-        return TRUE;
+    return TRUE;
 }
 
-long map(long x, long in_min, long in_max, long out_min, long out_max) {
+long map(long x, long in_min, long in_max, long out_min, long out_max)
+{
     long out = (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
-  if (out > out_max) {
-    out = out_max;
-  }
-  if (out < out_min) {
-    out = out_min;
-  }
-  return out;
-
+    if (out > out_max)
+    {
+        out = out_max;
+    }
+    if (out < out_min)
+    {
+        out = out_min;
+    }
+    return out;
 }
 
 static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepad, struct CapsFlags *caps)
@@ -209,8 +252,7 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         XINPUT_GAMEPAD_START,
         XINPUT_GAMEPAD_GUIDE,
         XINPUT_GAMEPAD_LEFT_THUMB,
-        XINPUT_GAMEPAD_RIGHT_THUMB
-    };
+        XINPUT_GAMEPAD_RIGHT_THUMB};
     // bool blue : 1; // square
     // bool green : 1; // cross
     // bool red : 1; // circle
@@ -229,15 +271,15 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         XINPUT_GAMEPAD_B,
         XINPUT_GAMEPAD_Y,
         XINPUT_GAMEPAD_LEFT_SHOULDER,
-        0x00, // tilt
+        0x00,                      // tilt
         XINPUT_GAMEPAD_LEFT_THUMB, // solo
-        0x00, 
+        0x00,
         XINPUT_GAMEPAD_BACK,
         XINPUT_GAMEPAD_START,
         XINPUT_GAMEPAD_RIGHT_THUMB,
         XINPUT_GAMEPAD_GUIDE,
         0x00
-        
+
     };
     static const int ps3_gh_buttons[] = {
         XINPUT_GAMEPAD_Y,
@@ -247,13 +289,13 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         XINPUT_GAMEPAD_LEFT_SHOULDER,
         0x00, // tilt
         0x00, // solo
-        0x00, 
+        0x00,
         XINPUT_GAMEPAD_BACK,
         XINPUT_GAMEPAD_START,
         XINPUT_GAMEPAD_RIGHT_THUMB,
         XINPUT_GAMEPAD_GUIDE,
         0x00
-        
+
     };
     int i, buttons;
 
@@ -264,29 +306,46 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     {
         switch (js->rgdwPOV[0])
         {
-            case 0    : gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_UP; break;
-            case 4500 : gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_UP; /* fall through */
-            case 9000 : gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT; break;
-            case 13500: gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT; /* fall through */
-            case 18000: gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_DOWN; break;
-            case 22500: gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_DOWN; /* fall through */
-            case 27000: gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_LEFT; break;
-            case 31500: gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_UP;
+        case 0:
+            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+            break;
+        case 4500:
+            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_UP; /* fall through */
+        case 9000:
+            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+            break;
+        case 13500:
+            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT; /* fall through */
+        case 18000:
+            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+            break;
+        case 22500:
+            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_DOWN; /* fall through */
+        case 27000:
+            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+            break;
+        case 31500:
+            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_UP;
         }
     }
 
     /* Buttons */
-    if (caps->ps3rb) {
+    if (caps->ps3rb)
+    {
         buttons = min(caps->buttons, sizeof(ps3_buttons) / sizeof(*ps3_buttons));
         for (i = 0; i < buttons; i++)
             if (js->rgbButtons[i] & 0x80)
                 gamepad->wButtons |= ps3_buttons[i];
-    } else if (caps->ps3gh) {
+    }
+    else if (caps->ps3gh)
+    {
         buttons = min(caps->buttons, sizeof(ps3_gh_buttons) / sizeof(*ps3_gh_buttons));
         for (i = 0; i < buttons; i++)
             if (js->rgbButtons[i] & 0x80)
                 gamepad->wButtons |= ps3_gh_buttons[i];
-    } else {
+    }
+    else
+    {
         buttons = min(caps->buttons, sizeof(xbox_buttons) / sizeof(*xbox_buttons));
         for (i = 0; i < buttons; i++)
             if (js->rgbButtons[i] & 0x80)
@@ -303,9 +362,12 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     else if (caps->ps3rb)
     {
         gamepad->sThumbRX = (js->lZ);
-        if (js->rgbButtons[5] & 0x80) {
+        if (js->rgbButtons[5] & 0x80)
+        {
             gamepad->sThumbRY = 32767;
-        } else {
+        }
+        else
+        {
             gamepad->sThumbRY = 0;
         }
     }
@@ -320,6 +382,16 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         gamepad->sThumbLX = gamepad->sThumbLY = gamepad->sThumbRY = 0;
         gamepad->sThumbRX = (js->lZ * 2) - 32768;
         gamepad->bLeftTrigger = 0;
+    }
+    else if (caps->force)
+    {
+        /* Axes */
+        gamepad->sThumbLX = js->lX;
+        gamepad->sThumbLY = -js->lY;
+        gamepad->sThumbRX = js->lRx;
+        gamepad->sThumbRY = -js->lRy;
+        gamepad->bLeftTrigger = (255 * (long)(js->lZ + 32767)) / 65535;
+        gamepad->bRightTrigger = (255 * (long)(js->lRz + 32767)) / 65535;
     }
     else
     {
@@ -347,7 +419,6 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     }
 }
 
-
 static void dinput_fill_effect(DIEFFECT *effect)
 {
     static DWORD axes[2] = {DIJOFS_X, DIJOFS_Y};
@@ -363,7 +434,6 @@ static void dinput_fill_effect(DIEFFECT *effect)
     effect->rglDirection = direction;
 }
 
-
 static void dinput_send_effect(int index, int power)
 {
     HRESULT hr;
@@ -374,7 +444,7 @@ static void dinput_send_effect(int index, int power)
     if (!*instance)
         dinput_fill_effect(effect);
 
-    effect->cbTypeSpecificParams  = sizeof(periodic);
+    effect->cbTypeSpecificParams = sizeof(periodic);
     effect->lpvTypeSpecificParams = &periodic;
 
     periodic.dwMagnitude = power;
@@ -416,12 +486,11 @@ static void dinput_send_effect(int index, int power)
     }
 }
 
-
 static BOOL CALLBACK dinput_enum_callback(const DIDEVICEINSTANCEA *instance, void *context)
 {
     LPDIRECTINPUTDEVICE8A device;
     HRESULT hr;
-    
+
     TRACE("Device %s\n", instance->tszProductName);
     if (strstr(instance->tszProductName, "(js)") != NULL)
     {
@@ -436,7 +505,7 @@ static BOOL CALLBACK dinput_enum_callback(const DIDEVICEINSTANCEA *instance, voi
         // Skip 'event' devices if asked to
         if (strstr(instance->tszProductName, "(event)") != NULL)
             return DIENUM_CONTINUE;
-	}
+    }
 
     if (dinput.mapped == sizeof(controllers) / sizeof(*controllers))
         return DIENUM_STOP;
@@ -464,18 +533,18 @@ static BOOL CALLBACK dinput_enum_callback(const DIDEVICEINSTANCEA *instance, voi
     return DIENUM_CONTINUE;
 }
 
-
 static void dinput_start(void)
 {
     HRESULT hr;
     if (initialized)
         return;
     initialized = TRUE;
-    #ifdef DEBUG
-     CONSOLE_SCREEN_BUFFER_INFO csbi;
+#ifdef DEBUG
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
 
     // Create a new console window.
-    if (!AllocConsole()) return;
+    if (!AllocConsole())
+        return;
 
     // Set the screen buffer to be larger than normal (this is optional).
     if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi))
@@ -483,23 +552,23 @@ static void dinput_start(void)
         csbi.dwSize.Y = 1000; // any useful number of lines...
         SetConsoleScreenBufferSize(GetStdHandle(STD_OUTPUT_HANDLE), csbi.dwSize);
     }
- 
 
     // Redirect "stdin" to the console window.
-    if (!freopen("CONIN$", "w", stdin)) return;
- 
+    if (!freopen("CONIN$", "w", stdin))
+        return;
 
     // Redirect "stderr" to the console window.
-    if (!freopen("CONOUT$", "w", stderr)) return;
+    if (!freopen("CONOUT$", "w", stderr))
+        return;
 
     // Redirect "stdout" to the console window.
-    if (!freopen("CONOUT$", "w", stdout)) return;
- 
+    if (!freopen("CONOUT$", "w", stdout))
+        return;
 
     // Turn off buffering for "stdout" ("stderr" is unbuffered by default).
 
     setbuf(stdout, NULL);
-    #endif
+#endif
 
     hr = DirectInput8Create(GetModuleHandleA(NULL), 0x0800, &IID_IDirectInput8A,
                             (void **)&dinput.iface, NULL);
@@ -520,15 +589,14 @@ static void dinput_start(void)
     dinput.enabled = TRUE;
 }
 
-
 static void dinput_update(int index)
 {
     HRESULT hr;
     DIJOYSTATE2 data;
     XINPUT_GAMEPAD_EX gamepad;
-    
+
     // DPRINT("dinput_update: %d\n", index);
-    
+
     if (dinput.enabled)
     {
         if (!controllers[index].acquired)
@@ -564,7 +632,6 @@ static void dinput_update(int index)
     }
 }
 
-
 void dumb_Init(DWORD version)
 {
     // Does nothing
@@ -572,7 +639,7 @@ void dumb_Init(DWORD version)
 
 void dumb_Cleanup()
 {
-	// Does nothing as well
+    // Does nothing as well
 }
 
 /* ============================ Dll Functions =============================== */
@@ -585,7 +652,7 @@ DWORD dumb_XInputGetState(DWORD index, XINPUT_STATE *state, DWORD caller_version
         XINPUT_STATE_EX state_ex;
     } xinput;
     DWORD ret;
-    
+
     // TRACE("dumb_XInputGetState: %d\n", index);
 
     ret = dumb_XInputGetStateEx(index, &xinput.state_ex, caller_version);
@@ -598,7 +665,6 @@ DWORD dumb_XInputGetState(DWORD index, XINPUT_STATE *state, DWORD caller_version
 
     return ERROR_SUCCESS;
 }
-
 
 DWORD dumb_XInputGetStateEx(DWORD index, XINPUT_STATE_EX *state_ex, DWORD caller_version)
 {
@@ -621,7 +687,6 @@ DWORD dumb_XInputGetStateEx(DWORD index, XINPUT_STATE_EX *state_ex, DWORD caller
 
     return ERROR_SUCCESS;
 }
-
 
 DWORD dumb_XInputSetState(DWORD index, XINPUT_VIBRATION *vibration, DWORD caller_version)
 {
@@ -654,7 +719,6 @@ DWORD dumb_XInputSetState(DWORD index, XINPUT_VIBRATION *vibration, DWORD caller
     return ERROR_SUCCESS;
 }
 
-
 void dumb_XInputEnable(BOOL enable)
 {
     /* Setting to false will stop messages from XInputSetState being sent
@@ -680,11 +744,11 @@ void dumb_XInputEnable(BOOL enable)
 
 /* Not defined anywhere ??? */
 #define XINPUT_CAPS_FFB_SUPPORTED 0x0001
-#define XINPUT_CAPS_WIRELESS      0x0002
+#define XINPUT_CAPS_WIRELESS 0x0002
 #define XINPUT_CAPS_NO_NAVIGATION 0x0010
 
 DWORD dumb_XInputGetCapabilities(DWORD index, DWORD flags,
-        XINPUT_CAPABILITIES *capabilities, DWORD caller_version)
+                                 XINPUT_CAPABILITIES *capabilities, DWORD caller_version)
 {
     TRACE("dumb_XInputGetCapabilities (%u %d %p)\n", index, flags, capabilities);
     if (!initialized)
@@ -712,9 +776,8 @@ DWORD dumb_XInputGetCapabilities(DWORD index, DWORD flags,
     return ERROR_SUCCESS;
 }
 
-
-DWORD dumb_XInputGetDSoundAudioDeviceGuids(DWORD dwUserIndex, GUID* pDSoundRenderGuid,
-        GUID* pDSoundCaptureGuid, DWORD caller_version)
+DWORD dumb_XInputGetDSoundAudioDeviceGuids(DWORD dwUserIndex, GUID *pDSoundRenderGuid,
+                                           GUID *pDSoundCaptureGuid, DWORD caller_version)
 {
     TRACE("dumb_XInputGetDSoundAudioDeviceGuids");
     if (dwUserIndex > 3)
@@ -724,20 +787,18 @@ DWORD dumb_XInputGetDSoundAudioDeviceGuids(DWORD dwUserIndex, GUID* pDSoundRende
     return ERROR_SUCCESS;
 }
 
-
 DWORD dumb_XInputGetKeystroke(DWORD dwUserIndex, DWORD dwReserved,
-        PXINPUT_KEYSTROKE pKeystroke, DWORD caller_version)
+                              PXINPUT_KEYSTROKE pKeystroke, DWORD caller_version)
 {
     FIXME("(index %u, reserved %u, keystroke %p) Stub!\n", dwUserIndex,
-            dwReserved, pKeystroke);
+          dwReserved, pKeystroke);
     if (dwUserIndex > 3)
         return ERROR_DEVICE_NOT_CONNECTED;
     return ERROR_EMPTY;
 }
 
-
 DWORD dumb_XInputGetBatteryInformation(DWORD dwUserIndex, BYTE devType,
-        XINPUT_BATTERY_INFORMATION *pBatteryInformation, DWORD caller_version)
+                                       XINPUT_BATTERY_INFORMATION *pBatteryInformation, DWORD caller_version)
 {
     TRACE("dumb_XInputGetBatteryInformation");
     pBatteryInformation->BatteryLevel = BATTERY_LEVEL_FULL;
@@ -745,12 +806,10 @@ DWORD dumb_XInputGetBatteryInformation(DWORD dwUserIndex, BYTE devType,
     return ERROR_SUCCESS;
 }
 
-
 DWORD dumb_XInputGetAudioDeviceIds(DWORD dwUserIndex, LPWSTR pRenderDeviceId,
-        UINT *pRenderCount, LPWSTR pCaptureDeviceId,
-        UINT *pCaptureCount, DWORD caller_version)
+                                   UINT *pRenderCount, LPWSTR pCaptureDeviceId,
+                                   UINT *pCaptureCount, DWORD caller_version)
 {
     TRACE("dumb_XInputGetAudioDeviceIds");
     return ERROR_DEVICE_NOT_CONNECTED;
 }
-
