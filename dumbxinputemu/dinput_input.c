@@ -125,7 +125,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     caps->crkd = false;
     caps->ps3rb = false;
     caps->ps3gh = false;
-    caps->rb360 = false;
+    caps->force = false;
 
     if (property.dwData == MAKELONG(0x1209, 0x2882))
     {
@@ -195,7 +195,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     if (dinput_caps.dwAxes == 6 && dinput_caps.dwButtons == 11 && dinput_caps.dwPOVs == 1)
     {
         TRACE("This controller has the same number of buttons/axes from xbox 360, should work...\n");
-        caps->rb360 = false;
+        caps->force = false;
     }
     else
     {
