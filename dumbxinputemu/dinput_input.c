@@ -7,7 +7,7 @@
 #include <stdio.h>
 
 #define DIRECTINPUT_VERSION 0x0800
-// #define DEBUG
+#define DEBUG
 #include "dinput.h"
 
 #ifndef TRACE
@@ -128,7 +128,10 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     caps->rb360 = false;
     caps->gh360 = false;
     caps->windows = false;
-
+    if (property.dwData == MAKELONG(0x0e6f, 0x024a) || property.dwData == MAKELONG(0x0e6f, 0x0173) || property.dwData == MAKELONG(0x0738, 0x8261) || property.dwData == MAKELONG(0x3651, 0x5500))
+    {
+        return FALSE;
+    }
     if (property.dwData == MAKELONG(0x1209, 0x2882))
     {
         TRACE("Setting subtype to guitar!\n");
@@ -202,7 +205,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     }
     else
     {
-        TRACE("This is not a known xbox controller, using anyway.\n");
+        TRACE("Controller is not a xinput gamepad.\n");
         caps->windows = true;
     }
     return TRUE;
