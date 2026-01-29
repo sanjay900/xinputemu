@@ -44,7 +44,7 @@
 
 struct CapsFlags
 {
-    BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps3gh, rb360, gh360, windows;
+    BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps4rb, ps5rb, ps3gh, rb360, gh360, windows;
     int axes, buttons, subtype;
 };
 
@@ -91,6 +91,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         MAKELONG(0x0e6f, 0x0006) /* edge */,
         MAKELONG(0x102c, 0xff0c) /* joytech */
     };
+
     int i;
 
     dinput_caps.dwSize = sizeof(dinput_caps);
@@ -124,10 +125,28 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     caps->santroller = false;
     caps->crkd = false;
     caps->ps3rb = false;
+    caps->ps4rb = false;
+    caps->ps5rb = false;
     caps->ps3gh = false;
     caps->rb360 = false;
     caps->gh360 = false;
     caps->windows = false;
+
+    if (property.dwData == MAKELONG(0x0e6f, 0x024a) || property.dwData == MAKELONG(0x0e6f, 0x0173) || property.dwData == MAKELONG(0x0738, 0x8261) || property.dwData == MAKELONG(0x3651, 0x5500) || property.dwData == MAKELONG(0x3651, 0x1500))
+    {
+        TRACE("Setting subtype to guitar!\n");
+        TRACE("PS4 guitar detected!\n");
+        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+        caps->ps4rb = true;
+    }
+
+    if (property.dwData == MAKELONG(0x0e6f, 0x0249) || property.dwData == MAKELONG(0x3651, 0x5600) || property.dwData == MAKELONG(0x3651, 0x1600))
+    {
+        TRACE("Setting subtype to guitar!\n");
+        TRACE("PS5 guitar detected!\n");
+        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+        caps->ps5rb = true;
+    }
     if (property.dwData == MAKELONG(0x1209, 0x2882))
     {
         TRACE("Setting subtype to guitar!\n");
@@ -290,6 +309,22 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         0x00
 
     };
+    static const int ps4_buttons[] = {
+        XINPUT_GAMEPAD_A,
+        XINPUT_GAMEPAD_B,
+        XINPUT_GAMEPAD_Y,
+        XINPUT_GAMEPAD_X,
+        XINPUT_GAMEPAD_LEFT_SHOULDER,
+        0x00,                      // tilt
+        XINPUT_GAMEPAD_LEFT_THUMB, // solo
+        0x00,
+        XINPUT_GAMEPAD_BACK,
+        XINPUT_GAMEPAD_START,
+        XINPUT_GAMEPAD_RIGHT_THUMB,
+        XINPUT_GAMEPAD_GUIDE,
+        0x00
+
+    };
     static const int ps3_gh_buttons[] = {
         XINPUT_GAMEPAD_Y,
         XINPUT_GAMEPAD_A,
@@ -346,6 +381,13 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
             if (js->rgbButtons[i] & 0x80)
                 gamepad->wButtons |= ps3_buttons[i];
     }
+    else if (caps->ps4rb || caps->ps5rb)
+    {
+        buttons = min(caps->buttons, sizeof(ps4_buttons) / sizeof(*ps4_buttons));
+        for (i = 0; i < buttons; i++)
+            if (js->rgbButtons[i] & 0x80)
+                gamepad->wButtons |= ps4_buttons[i];
+    }
     else if (caps->ps3gh)
     {
         buttons = min(caps->buttons, sizeof(ps3_gh_buttons) / sizeof(*ps3_gh_buttons));
@@ -379,6 +421,11 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         {
             gamepad->sThumbRY = 0;
         }
+    }
+    else if (caps->ps4rb || caps->ps5rb)
+    {
+        gamepad->sThumbRX = (js->lZ);
+        gamepad->sThumbRY = js->lRz;
     }
     else if (caps->ps3gh)
     {
