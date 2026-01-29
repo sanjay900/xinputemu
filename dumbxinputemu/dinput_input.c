@@ -44,7 +44,7 @@
 
 struct CapsFlags
 {
-    BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps3gh, force;
+    BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps3gh, rb360, gh360, windows;
     int axes, buttons, subtype;
 };
 
@@ -125,7 +125,9 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     caps->crkd = false;
     caps->ps3rb = false;
     caps->ps3gh = false;
-    caps->force = false;
+    caps->rb360 = false;
+    caps->gh360 = false;
+    caps->windows = false;
 
     if (property.dwData == MAKELONG(0x1209, 0x2882))
     {
@@ -165,7 +167,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         TRACE("XInput GH guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
         // on windows, 360 guitars don't actually show every axis, so we need to skip axis count checks
-        caps->force = true;
+        caps->gh360 = true;
     }
 
     if (property.dwData == MAKELONG(0x1BAD, 0x4734) || property.dwData == MAKELONG(0x0738, 0x9806) || property.dwData == MAKELONG(0x1BAD, 0x0719) || property.dwData == MAKELONG(0x1BAD, 0x0002))
@@ -174,7 +176,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         TRACE("XInput RB guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
         // on windows, 360 guitars don't actually show every axis, so we need to skip axis count checks
-        caps->force = true;
+        caps->rb360 = true;
     }
     if (property.dwData == MAKELONG(0x1BAD, 0x0130))
     {
@@ -183,6 +185,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
     }
     TRACE("vidpid: %08x\n", property.dwData);
+    TRACE("axes: %08x\n", dinput_caps.dwAxes);
+    TRACE("buttons: %08x\n", dinput_caps.dwButtons);
 
     for (i = 0; i < sizeof(wireless_products) / sizeof(wireless_products[0]); i++)
         if (property.dwData == wireless_products[i])
@@ -195,11 +199,11 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     if (dinput_caps.dwAxes == 6 && dinput_caps.dwButtons == 11 && dinput_caps.dwPOVs == 1)
     {
         TRACE("This controller has the same number of buttons/axes from xbox 360, should work...\n");
-        caps->force = false;
     }
     else
     {
-        TRACE("This is not a known xbox controller, using anyway. Expect problems!\n");
+        TRACE("This is not a known xbox controller, using anyway.\n");
+        caps->windows = true;
     }
     return TRUE;
 }
@@ -383,15 +387,21 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         gamepad->sThumbRX = (js->lZ * 2) - 32768;
         gamepad->bLeftTrigger = 0;
     }
-    else if (caps->force)
+    else if (caps->rb360 && caps->windows)
     {
         /* Axes */
         gamepad->sThumbLX = js->lX;
         gamepad->sThumbLY = -js->lY;
-        gamepad->sThumbRX = js->lRx;
-        gamepad->sThumbRY = -js->lRy;
-        gamepad->bLeftTrigger = (255 * (long)(js->lZ + 32767)) / 65535;
-        gamepad->bRightTrigger = (255 * (long)(js->lRz + 32767)) / 65535;
+        gamepad->sThumbRX = js->rglSlider[0];
+        gamepad->sThumbRY = js->lRz;
+    }
+    else if (caps->gh360 && caps->windows)
+    {
+        /* Axes */
+        gamepad->sThumbLX = js->lX;
+        gamepad->sThumbLY = -js->lY;
+        gamepad->sThumbRX = js->rglSlider[0];
+        gamepad->sThumbRY = js->lRz;
     }
     else
     {
