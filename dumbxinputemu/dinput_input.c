@@ -44,7 +44,7 @@
 
 struct CapsFlags
 {
-    BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps4rb, ps5rb, ps3gh, rb360, gh360, windows;
+    BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps4rb, ps5rb, ps3gh, rb360, gh360, windows, raphwii, raphpsx;
     int axes, buttons, subtype;
 };
 
@@ -153,6 +153,20 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         TRACE("Santroller guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
         caps->santroller = true;
+    }
+    if (property.dwData == MAKELONG(0x289b, 0x0080) || property.dwData == MAKELONG(0x289b, 0x0028) || property.dwData == MAKELONG(0x289b, 0x002B)|| property.dwData == MAKELONG(0x289b, 0x002C)|| property.dwData == MAKELONG(0x289b, 0x0081))
+    {
+        TRACE("Setting subtype to guitar!\n");
+        TRACE("Raphnet wusbmote detected!\n");
+        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+        caps->raphwii = true;
+    }
+    if (property.dwData == MAKELONG(0x289b, 0x00A3) || property.dwData == MAKELONG(0x289b, 0x0044)||property.dwData == MAKELONG(0x289b, 0x0045)||property.dwData == MAKELONG(0x289b, 0x0046)||property.dwData == MAKELONG(0x289b, 0x0047))
+    {
+        TRACE("Setting subtype to guitar!\n");
+        TRACE("Raphnet ps2 adapter detected!\n");
+        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+        caps->raphpsx = true;
     }
 
     if (property.dwData == MAKELONG(0x045e, 0x028e))
@@ -281,18 +295,7 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         XINPUT_GAMEPAD_GUIDE,
         XINPUT_GAMEPAD_LEFT_THUMB,
         XINPUT_GAMEPAD_RIGHT_THUMB};
-    // bool blue : 1; // square
-    // bool green : 1; // cross
-    // bool red : 1; // circle
-    // bool yellow : 1; // triangle
 
-    // bool orange : 1; // l1
-    // bool tilt : 1; // r1
-    // bool solo : 1; // l2
-    // bool : 1;
-
-    // bool select : 1;
-    // bool start : 1;
     static const int ps3_buttons[] = {
         XINPUT_GAMEPAD_X,
         XINPUT_GAMEPAD_A,
@@ -307,6 +310,41 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         XINPUT_GAMEPAD_RIGHT_THUMB,
         XINPUT_GAMEPAD_GUIDE,
         0x00
+
+    };
+    static const int raph_wii_buttons[] = {
+        XINPUT_GAMEPAD_A,
+        XINPUT_GAMEPAD_B,
+        XINPUT_GAMEPAD_Y,
+        XINPUT_GAMEPAD_X,
+        XINPUT_GAMEPAD_LEFT_SHOULDER,
+        XINPUT_GAMEPAD_DPAD_UP,                      // tilt
+        XINPUT_GAMEPAD_START, // solo
+        XINPUT_GAMEPAD_BACK,
+        XINPUT_GAMEPAD_DPAD_DOWN,
+        0x00,
+        0x00,
+        0x00,
+        0x00
+
+    };
+    static const int raph_psx_buttons[] = {
+        XINPUT_GAMEPAD_LEFT_SHOULDER,
+        XINPUT_GAMEPAD_X,
+        XINPUT_GAMEPAD_B,
+        XINPUT_GAMEPAD_Y,
+        XINPUT_GAMEPAD_START,
+        XINPUT_GAMEPAD_BACK, 
+        0x00, 
+        0x00,
+        0x00, // TILT
+        XINPUT_GAMEPAD_A,
+        0x00,
+        0x00,
+        XINPUT_GAMEPAD_DPAD_UP,
+        XINPUT_GAMEPAD_DPAD_DOWN,
+        XINPUT_GAMEPAD_DPAD_LEFT,
+        XINPUT_GAMEPAD_DPAD_RIGHT
 
     };
     static const int ps4_buttons[] = {
@@ -374,7 +412,21 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     }
 
     /* Buttons */
-    if (caps->ps3rb)
+    if (caps->raphwii)
+    {
+        buttons = min(caps->buttons, sizeof(raph_wii_buttons) / sizeof(*raph_wii_buttons));
+        for (i = 0; i < buttons; i++)
+            if (js->rgbButtons[i] & 0x80)
+                gamepad->wButtons |= raph_wii_buttons[i];
+    }
+    else if (caps->raphpsx)
+    {
+        buttons = min(caps->buttons, sizeof(raph_psx_buttons) / sizeof(*raph_psx_buttons));
+        for (i = 0; i < buttons; i++)
+            if (js->rgbButtons[i] & 0x80)
+                gamepad->wButtons |= raph_psx_buttons[i];
+    }
+    else if (caps->ps3rb)
     {
         buttons = min(caps->buttons, sizeof(ps3_buttons) / sizeof(*ps3_buttons));
         for (i = 0; i < buttons; i++)
@@ -414,6 +466,22 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     {
         gamepad->sThumbRX = (js->lZ);
         if (js->rgbButtons[5] & 0x80)
+        {
+            gamepad->sThumbRY = 32767;
+        }
+        else
+        {
+            gamepad->sThumbRY = 0;
+        }
+    }
+    else if (caps->raphwii)
+    {
+        gamepad->sThumbRX = (js->lZ);
+    }
+    else if (caps->raphpsx)
+    {
+        gamepad->sThumbRX = (js->lZ);
+        if (js->rgbButtons[8] & 0x80)
         {
             gamepad->sThumbRY = 32767;
         }
