@@ -322,7 +322,7 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         XINPUT_GAMEPAD_START,
         XINPUT_GAMEPAD_RIGHT_THUMB,
         XINPUT_GAMEPAD_GUIDE,
-        0x00
+        XINPUT_GAMEPAD_START // map p1 to start so clicking in the joystick works
 
     };
     static const int ps3_gh_buttons[] = {
