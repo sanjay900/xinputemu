@@ -128,10 +128,6 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     caps->rb360 = false;
     caps->gh360 = false;
     caps->windows = false;
-    if (property.dwData == MAKELONG(0x0e6f, 0x024a) || property.dwData == MAKELONG(0x0e6f, 0x0173) || property.dwData == MAKELONG(0x0738, 0x8261) || property.dwData == MAKELONG(0x3651, 0x5500))
-    {
-        return FALSE;
-    }
     if (property.dwData == MAKELONG(0x1209, 0x2882))
     {
         TRACE("Setting subtype to guitar!\n");
@@ -146,6 +142,12 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         TRACE("CRKD guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
         caps->crkd = true;
+    }
+    if (property.dwData == MAKELONG(0x1BAD, 0x0719))
+    {
+        TRACE("Setting subtype to guitar!\n");
+        TRACE("clipper / rb4instrumentmapper detected!\n");
+        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
     }
 
     if (property.dwData == MAKELONG(0x12ba, 0x0200) || property.dwData == MAKELONG(0x1BAD, 0x0004) || property.dwData == MAKELONG(0x1BAD, 0x3010))
@@ -173,7 +175,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         caps->gh360 = true;
     }
 
-    if (property.dwData == MAKELONG(0x1BAD, 0x4734) || property.dwData == MAKELONG(0x0738, 0x9806) || property.dwData == MAKELONG(0x1BAD, 0x0719) || property.dwData == MAKELONG(0x1BAD, 0x0002))
+    if (property.dwData == MAKELONG(0x1BAD, 0x4734) || property.dwData == MAKELONG(0x0738, 0x9806) || property.dwData == MAKELONG(0x1BAD, 0x0002))
     {
         TRACE("Setting subtype to guitar!\n");
         TRACE("XInput RB guitar detected!\n");
