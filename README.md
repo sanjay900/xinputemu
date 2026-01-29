@@ -3,9 +3,15 @@ Santroller xinput Emulator
 
 This is an xinput dll reimplementation compatible with DirectInput controllers. Think of x360ce without the configuration. For supported instruments, it makes sure to set the correct subtype.
 
-It currently supports santroller instruments, CRKD instruments, and any wired XInput guitars.
+Supported instruments:
+Santroller Guitars and adapters (works on windows and linux)
+PS3 RB / GH (requires disabling SDL for wine, just works on windows)
+PS4 / PS5 RB (requires clipper on windows, requires [hid-sony](https://github.com/Rosalie241/hid-sony))
+XInput guitars (works on windows and linux)
+CRKD Guitars (use PC mode 8 / legacy pc mode)
+Raphnet wii adapters (requires disabling SDL for wine, just works on windows)
+Raphnet PSX adapters (untested, requires disabling SDL for wine, should just work on windows)
 
-Note that people wanting to use Xbox CRKD guitars on their linux machines will need to use https://github.com/sanjay900/xpad as the xbox crkd guitar ids are not currently in the linux kernel, but they have been submitted so in the future they should be in there.
 ##### Usage
 - download and extract the [latest release](https://github.com/sanjay900/xinputemu/releases/latest)
 - copy all xinputXYZ.dll's next to the game executable and start the game
