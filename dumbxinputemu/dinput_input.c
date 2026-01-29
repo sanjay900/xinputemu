@@ -73,6 +73,18 @@ static struct
 static bool initialized = FALSE;
 static void dinput_start(void);
 
+static bool KeyExists(HKEY hKeyRoot, LPCWSTR subKey) {
+    HKEY hKey;
+    LONG result = RegOpenKeyExW(hKeyRoot, subKey, 0, KEY_READ, &hKey);
+    
+    if (result == ERROR_SUCCESS) {
+        RegCloseKey(hKey);
+        return true;
+    } else {
+        return false;
+    }
+}
+
 static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags *caps)
 {
     HRESULT hr;
@@ -91,6 +103,17 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         MAKELONG(0x0e6f, 0x0006) /* edge */,
         MAKELONG(0x102c, 0xff0c) /* joytech */
     };
+    bool wine = false;
+    if (KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine")) {
+        wine = true;
+    }
+    if (KeyExists(HKEY_CURRENT_USER, L"Software\\Wine")) {
+        wine = true;
+    }
+
+    if (wine) {
+        TRACE("Running on wine\r\n");
+    }
 
     int i;
 
@@ -152,7 +175,13 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         TRACE("Setting subtype to guitar!\n");
         TRACE("Santroller guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-        caps->santroller = true;
+        if (wine) {
+            // on wine, assume hid
+            caps->santroller = true;
+        } else {
+            // on windows, assume xinput
+            caps->gh360 = true;
+        }
     }
     if (property.dwData == MAKELONG(0x289b, 0x0080) || property.dwData == MAKELONG(0x289b, 0x0028) || property.dwData == MAKELONG(0x289b, 0x002B)|| property.dwData == MAKELONG(0x289b, 0x002C)|| property.dwData == MAKELONG(0x289b, 0x0081))
     {
