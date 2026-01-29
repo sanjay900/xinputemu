@@ -89,7 +89,6 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
 {
     HRESULT hr;
     DIPROPDWORD property;
-    DIPROPGUIDANDPATH propguidandpath;
     DIDEVCAPS dinput_caps;
     static const unsigned long wireless_products[] = {
         MAKELONG(0x045e, 0x0291) /* microsoft receiver */,
@@ -103,15 +102,11 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         MAKELONG(0x0e6f, 0x0006) /* edge */,
         MAKELONG(0x102c, 0xff0c) /* joytech */
     };
-    bool wine = false;
-    if (KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine")) {
-        wine = true;
-    }
-    if (KeyExists(HKEY_CURRENT_USER, L"Software\\Wine")) {
-        wine = true;
-    }
+    caps->windows = !(KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine") || KeyExists(HKEY_CURRENT_USER, L"Software\\Wine"));
 
-    if (wine) {
+    if (caps->windows) {
+        TRACE("Running on windows\r\n");
+    } else {
         TRACE("Running on wine\r\n");
     }
 
@@ -126,11 +121,6 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     property.diph.dwHeaderSize = sizeof(property.diph);
     property.diph.dwObj = 0;
     property.diph.dwHow = DIPH_DEVICE;
-
-    propguidandpath.diph.dwSize = sizeof(propguidandpath);
-    propguidandpath.diph.dwHeaderSize = sizeof(propguidandpath.diph);
-    propguidandpath.diph.dwObj = 0;
-    propguidandpath.diph.dwHow = DIPH_DEVICE;
 
     hr = IDirectInputDevice_GetProperty(device, DIPROP_VIDPID, &property.diph);
     if (FAILED(hr))
@@ -153,7 +143,6 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     caps->ps3gh = false;
     caps->rb360 = false;
     caps->gh360 = false;
-    caps->windows = false;
 
     if (property.dwData == MAKELONG(0x0e6f, 0x024a) || property.dwData == MAKELONG(0x0e6f, 0x0173) || property.dwData == MAKELONG(0x0738, 0x8261) || property.dwData == MAKELONG(0x3651, 0x5500) || property.dwData == MAKELONG(0x3651, 0x1500))
     {
@@ -175,12 +164,14 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         TRACE("Setting subtype to guitar!\n");
         TRACE("Santroller guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-        if (wine) {
-            // on wine, assume hid
-            caps->santroller = true;
-        } else {
+        if (caps->windows) {
             // on windows, assume xinput
             caps->gh360 = true;
+            TRACE("on windows, assuming xinput!\n");
+        } else {
+            // on wine, assume hid
+            caps->santroller = true;
+            TRACE("on wine, assuming hid!\n");
         }
     }
     if (property.dwData == MAKELONG(0x289b, 0x0080) || property.dwData == MAKELONG(0x289b, 0x0028) || property.dwData == MAKELONG(0x289b, 0x002B)|| property.dwData == MAKELONG(0x289b, 0x002C)|| property.dwData == MAKELONG(0x289b, 0x0081))
@@ -247,7 +238,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     }
     if (property.dwData == MAKELONG(0x1BAD, 0x0130))
     {
-        TRACE("Setting subtype to drumd!\n");
+        TRACE("Setting subtype to drums!\n");
         TRACE("XInput drums detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
     }
@@ -263,15 +254,6 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
             break;
         }
 
-    if (dinput_caps.dwAxes == 6 && dinput_caps.dwButtons == 11 && dinput_caps.dwPOVs == 1)
-    {
-        TRACE("This controller has the same number of buttons/axes from xbox 360, should work...\n");
-    }
-    else
-    {
-        TRACE("Controller is not a xinput gamepad.\n");
-        caps->windows = true;
-    }
     return TRUE;
 }
 
@@ -538,18 +520,32 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     }
     else if (caps->rb360 && caps->windows)
     {
+        LONG whammy = js->rglSlider[0];
+        if (whammy > INT16_MAX) {
+            whammy = INT16_MAX;
+        }
+        if (whammy < INT16_MIN) {
+            whammy = INT16_MIN;
+        }
         /* Axes */
         gamepad->sThumbLX = js->lX;
         gamepad->sThumbLY = -js->lY;
-        gamepad->sThumbRX = js->rglSlider[0];
+        gamepad->sThumbRX = whammy;
         gamepad->sThumbRY = js->lRz;
     }
     else if (caps->gh360 && caps->windows)
     {
+        LONG whammy = js->rglSlider[0];
+        if (whammy > INT16_MAX) {
+            whammy = INT16_MAX;
+        }
+        if (whammy < INT16_MIN) {
+            whammy = INT16_MIN;
+        }
         /* Axes */
         gamepad->sThumbLX = js->lX;
         gamepad->sThumbLY = -js->lY;
-        gamepad->sThumbRX = js->rglSlider[0];
+        gamepad->sThumbRX = whammy;
         gamepad->sThumbRY = js->lRz;
     }
     else
