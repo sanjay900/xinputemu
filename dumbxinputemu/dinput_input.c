@@ -44,7 +44,7 @@
 
 struct CapsFlags
 {
-    BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps4rb, ps5rb, ps3gh, rb360, gh360, windows, raphwii, raphpsx;
+    BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps4rb, ps5rb, ps3gh, rb360, gh360, windows, raphwii, raphpsx, seenwhammy;
     int axes, buttons, subtype;
 };
 
@@ -102,6 +102,54 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         MAKELONG(0x0e6f, 0x0006) /* edge */,
         MAKELONG(0x102c, 0xff0c) /* joytech */
     };
+    static const unsigned long ps4_products[] = {
+        MAKELONG(0x0e6f, 0x024a) /* PS4 Riffmaster */,
+        MAKELONG(0x0e6f, 0x0173) /* PDP Jaguar */,
+        MAKELONG(0x0738, 0x8261) /* MadCatz Stratocaster */,
+        MAKELONG(0x3651, 0x5500) /* CRKD SG */,
+        MAKELONG(0x3651, 0x1500) /* CRKD SG */
+    };
+    static const unsigned long ps5_products[] = {
+        MAKELONG(0x0e6f, 0x0249) /* PS5 Riffmaster */,
+        MAKELONG(0x3651, 0x5600) /* CRKD SG */,
+        MAKELONG(0x3651, 0x1600) /* CRKD SG */
+    };
+    static const unsigned long raphnet_wii_products[] = {
+        MAKELONG(0x289b, 0x0080) /* 1-player WUSBMote v2.2 (w/advXarch) */,
+        MAKELONG(0x289b, 0x0081) /* 2-player WUSBMote v2.2 (w/advXarch) */,
+        MAKELONG(0x289b, 0x0028) /* 1-player WUSBMote v2.0 (w/advXarch) */,
+        MAKELONG(0x289b, 0x0029) /* 2-player WUSBMote v2.0 (w/advXarch) */,
+        MAKELONG(0x289b, 0x002B) /* 1-player WUSBMote v2.1 (w/advXarch) */,
+        MAKELONG(0x289b, 0x002C) /* 2-player WUSBMote v2.1 (w/advXarch) */,
+    };
+    static const unsigned long raphnet_ps2_products[] = {
+        MAKELONG(0x289b, 0x0044) /* PS1/PS2 controller to USB adapter (w/advXarch) */,
+        MAKELONG(0x289b, 0x0045) /* PS1/PS2 controller to USB adapter (2-player mode) */,
+        MAKELONG(0x289b, 0x0046) /* PS1/PS2 controller to USB adapter (3-player mode) */,
+        MAKELONG(0x289b, 0x0047) /* PS1/PS2 controller to USB adapter (4-player mode) */,
+    };
+    static const unsigned long rb_ps3_products[] = {
+        MAKELONG(0x12BA, 0x0200) /* Harmonix Guitar for PlayStation®3 */,
+        MAKELONG(0x1BAD, 0x0004) /* Harmonix Guitar Controller for Nintendo Wii (RB1) */,
+        MAKELONG(0x1BAD, 0x3010) /* Harmonix Guitar Controller for Nintendo Wii (RB2+) */,
+    };
+    static const unsigned long gh_ps3_products[] = {
+        MAKELONG(0x12BA, 0x0100) /* Guitar Hero3 for PlayStation (R) 3 */,
+        MAKELONG(0x1430, 0x474C) /* Guitar Hero for PC/MAC */,
+    };
+    static const unsigned long gh_xinput_products[] = {
+        MAKELONG(0x1430, 0x4734) /* World Tour Kiosk */,
+        MAKELONG(0x3651, 0x1000) /* CRKD SG Legacy Mode */,
+        MAKELONG(0x0351, 0x1000) /* CRKD Xbox Black Tribal PC Mode */,
+        MAKELONG(0x0351, 0x2000) /* CRKD Xbox Blueberry Burst PC Mode */,
+        MAKELONG(0x1430, 0x4748) /* Xplorer */,
+        MAKELONG(0x1430, 0x0705) /* GH5 Guitar */,
+        MAKELONG(0x1430, 0x0706) /* WoR Guitar */,
+    };
+    static const unsigned long rb_xinput_products[] = {
+        MAKELONG(0x1BAD, 0x0002) /* RB Guitar */,
+        MAKELONG(0x0738, 0x9806) /* Precision Bass */
+    };
     caps->windows = !(KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine") || KeyExists(HKEY_CURRENT_USER, L"Software\\Wine"));
 
     if (caps->windows) {
@@ -143,22 +191,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     caps->ps3gh = false;
     caps->rb360 = false;
     caps->gh360 = false;
+    caps->seenwhammy = false;
 
-    if (property.dwData == MAKELONG(0x0e6f, 0x024a) || property.dwData == MAKELONG(0x0e6f, 0x0173) || property.dwData == MAKELONG(0x0738, 0x8261) || property.dwData == MAKELONG(0x3651, 0x5500) || property.dwData == MAKELONG(0x3651, 0x1500))
-    {
-        TRACE("Setting subtype to guitar!\n");
-        TRACE("PS4 guitar detected!\n");
-        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-        caps->ps4rb = true;
-    }
-
-    if (property.dwData == MAKELONG(0x0e6f, 0x0249) || property.dwData == MAKELONG(0x3651, 0x5600) || property.dwData == MAKELONG(0x3651, 0x1600))
-    {
-        TRACE("Setting subtype to guitar!\n");
-        TRACE("PS5 guitar detected!\n");
-        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-        caps->ps5rb = true;
-    }
     if (property.dwData == MAKELONG(0x1209, 0x2882))
     {
         TRACE("Setting subtype to guitar!\n");
@@ -174,21 +208,6 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
             TRACE("on wine, assuming hid!\n");
         }
     }
-    if (property.dwData == MAKELONG(0x289b, 0x0080) || property.dwData == MAKELONG(0x289b, 0x0028) || property.dwData == MAKELONG(0x289b, 0x002B)|| property.dwData == MAKELONG(0x289b, 0x002C)|| property.dwData == MAKELONG(0x289b, 0x0081))
-    {
-        TRACE("Setting subtype to guitar!\n");
-        TRACE("Raphnet wusbmote detected!\n");
-        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-        caps->raphwii = true;
-    }
-    if (property.dwData == MAKELONG(0x289b, 0x00A3) || property.dwData == MAKELONG(0x289b, 0x0044)||property.dwData == MAKELONG(0x289b, 0x0045)||property.dwData == MAKELONG(0x289b, 0x0046)||property.dwData == MAKELONG(0x289b, 0x0047))
-    {
-        TRACE("Setting subtype to guitar!\n");
-        TRACE("Raphnet ps2 adapter detected!\n");
-        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-        caps->raphpsx = true;
-    }
-
     if (property.dwData == MAKELONG(0x045e, 0x028e))
     {
         TRACE("Setting subtype to guitar!\n");
@@ -203,39 +222,6 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
     }
 
-    if (property.dwData == MAKELONG(0x12ba, 0x0200) || property.dwData == MAKELONG(0x1BAD, 0x0004) || property.dwData == MAKELONG(0x1BAD, 0x3010))
-    {
-        TRACE("Setting subtype to guitar!\n");
-        TRACE("RB PS3 guitar detected!\n");
-        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-        caps->ps3rb = true;
-    }
-
-    if (property.dwData == MAKELONG(0x12ba, 0x0100) || property.dwData == MAKELONG(0x1430, 0x474C))
-    {
-        TRACE("Setting subtype to guitar!\n");
-        TRACE("GH PS3 guitar detected!\n");
-        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-        caps->ps3gh = true;
-    }
-
-    if (property.dwData == MAKELONG(0x1430, 0x4734) || property.dwData == MAKELONG(0x3651, 0x1000) || property.dwData == MAKELONG(0x0351, 0x1000) || property.dwData == MAKELONG(0x0351, 0x2000) || property.dwData == MAKELONG(0x1430, 0x4748) || property.dwData == MAKELONG(0x1430, 0x0705) || property.dwData == MAKELONG(0x1430, 0x0706))
-    {
-        TRACE("Setting subtype to guitar!\n");
-        TRACE("XInput GH guitar detected!\n");
-        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-        // on windows, 360 guitars don't actually show every axis, so we need to skip axis count checks
-        caps->gh360 = true;
-    }
-
-    if (property.dwData == MAKELONG(0x1BAD, 0x4734) || property.dwData == MAKELONG(0x0738, 0x9806) || property.dwData == MAKELONG(0x1BAD, 0x0002))
-    {
-        TRACE("Setting subtype to guitar!\n");
-        TRACE("XInput RB guitar detected!\n");
-        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-        // on windows, 360 guitars don't actually show every axis, so we need to skip axis count checks
-        caps->rb360 = true;
-    }
     if (property.dwData == MAKELONG(0x1BAD, 0x0130))
     {
         TRACE("Setting subtype to drums!\n");
@@ -246,13 +232,104 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     TRACE("axes: %08x\n", dinput_caps.dwAxes);
     TRACE("buttons: %08x\n", dinput_caps.dwButtons);
 
-    for (i = 0; i < sizeof(wireless_products) / sizeof(wireless_products[0]); i++)
+    for (i = 0; i < sizeof(wireless_products) / sizeof(wireless_products[0]); i++) {
         if (property.dwData == wireless_products[i])
         {
             caps->wireless = TRUE;
             caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
             break;
         }
+    }
+    
+    for (i = 0; i < sizeof(ps4_products) / sizeof(ps4_products[0]); i++) {
+        if (property.dwData == ps4_products[i])
+        {
+            TRACE("Setting subtype to guitar!\n");
+            TRACE("PS4 guitar detected!\n");
+            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            caps->ps4rb = true;
+            break;
+        }
+    }
+
+    for (i = 0; i < sizeof(ps5_products) / sizeof(ps5_products[0]); i++) {
+        if (property.dwData == ps5_products[i])
+        {
+            TRACE("Setting subtype to guitar!\n");
+            TRACE("PS5 guitar detected!\n");
+            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            caps->ps5rb = true;
+            break;
+        }
+    }
+
+    for (i = 0; i < sizeof(raphnet_wii_products) / sizeof(raphnet_wii_products[0]); i++) {
+        if (property.dwData == raphnet_wii_products[i])
+        {
+            TRACE("Setting subtype to guitar!\n");
+            TRACE("Raphnet wusbmote detected!\n");
+            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            caps->raphwii = true;
+            break;
+        }
+    }
+
+    for (i = 0; i < sizeof(raphnet_ps2_products) / sizeof(raphnet_ps2_products[0]); i++) {
+        if (property.dwData == raphnet_ps2_products[i])
+        {
+            TRACE("Setting subtype to guitar!\n");
+            TRACE("Raphnet ps2 adapter detected!\n");
+            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            caps->raphpsx = true;
+            break;
+        }
+    }
+
+    for (i = 0; i < sizeof(rb_ps3_products) / sizeof(rb_ps3_products[0]); i++) {
+        if (property.dwData == rb_ps3_products[i])
+        {
+            TRACE("Setting subtype to guitar!\n");
+            TRACE("RB PS3 guitar detected!\n");
+            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            caps->ps3rb = true;
+            break;
+        }
+    }
+
+    for (i = 0; i < sizeof(gh_ps3_products) / sizeof(gh_ps3_products[0]); i++) {
+        if (property.dwData == gh_ps3_products[i])
+        {
+            TRACE("Setting subtype to guitar!\n");
+            TRACE("GH PS3 guitar detected!\n");
+            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            caps->ps3gh = true;
+            break;
+        }
+    }
+
+    for (i = 0; i < sizeof(gh_xinput_products) / sizeof(gh_xinput_products[0]); i++) {
+        if (property.dwData == gh_xinput_products[i])
+        {
+            TRACE("Setting subtype to guitar!\n");
+            TRACE("XInput GH guitar detected!\n");
+            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            // on windows, 360 guitars don't actually show every axis, so we need to skip axis count checks
+            caps->gh360 = true;
+            break;
+        }
+    }
+
+    for (i = 0; i < sizeof(rb_xinput_products) / sizeof(rb_xinput_products[0]); i++) {
+        if (property.dwData == rb_xinput_products[i])
+        {
+            TRACE("Setting subtype to guitar!\n");
+            TRACE("XInput RB guitar detected!\n");
+            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            // on windows, 360 guitars don't actually show every axis, so we need to skip axis count checks
+            caps->rb360 = true;
+            break;
+        }
+    }
 
     return TRUE;
 }
@@ -527,6 +604,12 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         if (whammy < INT16_MIN) {
             whammy = INT16_MIN;
         }
+        if (whammy) {
+            caps->seenwhammy = true;
+        }
+        if (!caps->seenwhammy) {
+            whammy = INT16_MIN;
+        }
         /* Axes */
         gamepad->sThumbLX = js->lX;
         gamepad->sThumbLY = -js->lY;
@@ -540,6 +623,12 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
             whammy = INT16_MAX;
         }
         if (whammy < INT16_MIN) {
+            whammy = INT16_MIN;
+        }
+        if (whammy) {
+            caps->seenwhammy = true;
+        }
+        if (!caps->seenwhammy) {
             whammy = INT16_MIN;
         }
         /* Axes */
