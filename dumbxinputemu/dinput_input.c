@@ -6,6 +6,8 @@
 #include <cguid.h>
 #include <stdio.h>
 
+#include <time.h>
+
 #define DIRECTINPUT_VERSION 0x0800
 // #define DEBUG
 #include "dinput.h"
@@ -46,6 +48,7 @@ struct CapsFlags
 {
     BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps4rb, ps5rb, ps3gh, rb360, gh360, windows, raphwii, raphpsx, seenwhammy;
     int axes, buttons, subtype;
+    clock_t time;
 };
 
 static struct ControllerMap
@@ -73,14 +76,18 @@ static struct
 static bool initialized = FALSE;
 static void dinput_start(void);
 
-static bool KeyExists(HKEY hKeyRoot, LPCWSTR subKey) {
+static bool KeyExists(HKEY hKeyRoot, LPCWSTR subKey)
+{
     HKEY hKey;
     LONG result = RegOpenKeyExW(hKeyRoot, subKey, 0, KEY_READ, &hKey);
-    
-    if (result == ERROR_SUCCESS) {
+
+    if (result == ERROR_SUCCESS)
+    {
         RegCloseKey(hKey);
         return true;
-    } else {
+    }
+    else
+    {
         return false;
     }
 }
@@ -152,9 +159,12 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     };
     caps->windows = !(KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine") || KeyExists(HKEY_CURRENT_USER, L"Software\\Wine"));
 
-    if (caps->windows) {
+    if (caps->windows)
+    {
         TRACE("Running on windows\r\n");
-    } else {
+    }
+    else
+    {
         TRACE("Running on wine\r\n");
     }
 
@@ -192,17 +202,21 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     caps->rb360 = false;
     caps->gh360 = false;
     caps->seenwhammy = false;
+    caps->time = clock();
 
     if (property.dwData == MAKELONG(0x1209, 0x2882))
     {
         TRACE("Setting subtype to guitar!\n");
         TRACE("Santroller guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-        if (caps->windows) {
-            // on windows, assume xinput
+        if (caps->windows)
+        {
+            // on windows, xinput guitars only have two axis
             caps->gh360 = true;
             TRACE("on windows, assuming xinput!\n");
-        } else {
+        }
+        else
+        {
             // on wine, assume hid
             caps->santroller = true;
             TRACE("on wine, assuming hid!\n");
@@ -232,7 +246,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     TRACE("axes: %08x\n", dinput_caps.dwAxes);
     TRACE("buttons: %08x\n", dinput_caps.dwButtons);
 
-    for (i = 0; i < sizeof(wireless_products) / sizeof(wireless_products[0]); i++) {
+    for (i = 0; i < sizeof(wireless_products) / sizeof(wireless_products[0]); i++)
+    {
         if (property.dwData == wireless_products[i])
         {
             caps->wireless = TRUE;
@@ -240,8 +255,9 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
             break;
         }
     }
-    
-    for (i = 0; i < sizeof(ps4_products) / sizeof(ps4_products[0]); i++) {
+
+    for (i = 0; i < sizeof(ps4_products) / sizeof(ps4_products[0]); i++)
+    {
         if (property.dwData == ps4_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
@@ -252,7 +268,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         }
     }
 
-    for (i = 0; i < sizeof(ps5_products) / sizeof(ps5_products[0]); i++) {
+    for (i = 0; i < sizeof(ps5_products) / sizeof(ps5_products[0]); i++)
+    {
         if (property.dwData == ps5_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
@@ -263,7 +280,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         }
     }
 
-    for (i = 0; i < sizeof(raphnet_wii_products) / sizeof(raphnet_wii_products[0]); i++) {
+    for (i = 0; i < sizeof(raphnet_wii_products) / sizeof(raphnet_wii_products[0]); i++)
+    {
         if (property.dwData == raphnet_wii_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
@@ -274,7 +292,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         }
     }
 
-    for (i = 0; i < sizeof(raphnet_ps2_products) / sizeof(raphnet_ps2_products[0]); i++) {
+    for (i = 0; i < sizeof(raphnet_ps2_products) / sizeof(raphnet_ps2_products[0]); i++)
+    {
         if (property.dwData == raphnet_ps2_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
@@ -285,7 +304,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         }
     }
 
-    for (i = 0; i < sizeof(rb_ps3_products) / sizeof(rb_ps3_products[0]); i++) {
+    for (i = 0; i < sizeof(rb_ps3_products) / sizeof(rb_ps3_products[0]); i++)
+    {
         if (property.dwData == rb_ps3_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
@@ -296,7 +316,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         }
     }
 
-    for (i = 0; i < sizeof(gh_ps3_products) / sizeof(gh_ps3_products[0]); i++) {
+    for (i = 0; i < sizeof(gh_ps3_products) / sizeof(gh_ps3_products[0]); i++)
+    {
         if (property.dwData == gh_ps3_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
@@ -307,7 +328,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         }
     }
 
-    for (i = 0; i < sizeof(gh_xinput_products) / sizeof(gh_xinput_products[0]); i++) {
+    for (i = 0; i < sizeof(gh_xinput_products) / sizeof(gh_xinput_products[0]); i++)
+    {
         if (property.dwData == gh_xinput_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
@@ -319,7 +341,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         }
     }
 
-    for (i = 0; i < sizeof(rb_xinput_products) / sizeof(rb_xinput_products[0]); i++) {
+    for (i = 0; i < sizeof(rb_xinput_products) / sizeof(rb_xinput_products[0]); i++)
+    {
         if (property.dwData == rb_xinput_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
@@ -406,8 +429,8 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         XINPUT_GAMEPAD_Y,
         XINPUT_GAMEPAD_X,
         XINPUT_GAMEPAD_LEFT_SHOULDER,
-        XINPUT_GAMEPAD_DPAD_UP,                      // tilt
-        XINPUT_GAMEPAD_START, // solo
+        XINPUT_GAMEPAD_DPAD_UP, // tilt
+        XINPUT_GAMEPAD_START,   // solo
         XINPUT_GAMEPAD_BACK,
         XINPUT_GAMEPAD_DPAD_DOWN,
         0x00,
@@ -422,8 +445,8 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         XINPUT_GAMEPAD_B,
         XINPUT_GAMEPAD_Y,
         XINPUT_GAMEPAD_START,
-        XINPUT_GAMEPAD_BACK, 
-        0x00, 
+        XINPUT_GAMEPAD_BACK,
+        0x00,
         0x00,
         0x00, // TILT
         XINPUT_GAMEPAD_A,
@@ -598,68 +621,96 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     else if (caps->rb360 && caps->windows)
     {
         LONG whammy = js->rglSlider[0];
-        if (whammy > INT16_MAX) {
+
+        if (whammy > INT16_MAX)
+        {
             whammy = INT16_MAX;
         }
-        if (whammy < INT16_MIN) {
+        if (whammy < INT16_MIN)
+        {
             whammy = INT16_MIN;
         }
-        if (whammy) {
+        if (whammy)
+        {
             caps->seenwhammy = true;
         }
-        if (!caps->seenwhammy) {
+        if (!caps->seenwhammy)
+        {
             whammy = INT16_MIN;
         }
-        /* Axes */
-        gamepad->sThumbLX = js->lX;
-        gamepad->sThumbLY = -js->lY;
-        gamepad->sThumbRX = whammy;
-        gamepad->sThumbRY = js->lRz;
+        // limit analog response poll rate as GH3 does not like getting updates too quick
+        clock_t now = clock();
+        if (now - caps->time < (CLOCKS_PER_SEC / 100) || caps->subtype != XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE)
+        {
+            caps->time = now;
+            /* Axes */
+            gamepad->sThumbLX = js->lX;
+            gamepad->sThumbLY = -js->lY;
+
+            gamepad->sThumbRX = whammy;
+            gamepad->sThumbRY = js->lRz;
+        }
     }
     else if (caps->gh360 && caps->windows)
     {
         LONG whammy = js->rglSlider[0];
-        if (whammy > INT16_MAX) {
+        if (whammy > INT16_MAX)
+        {
             whammy = INT16_MAX;
         }
-        if (whammy < INT16_MIN) {
+        if (whammy < INT16_MIN)
+        {
             whammy = INT16_MIN;
         }
-        if (whammy) {
+        if (whammy)
+        {
             caps->seenwhammy = true;
         }
-        if (!caps->seenwhammy) {
+        if (!caps->seenwhammy)
+        {
             whammy = INT16_MIN;
         }
-        /* Axes */
-        gamepad->sThumbLX = js->lX;
-        gamepad->sThumbLY = -js->lY;
-        gamepad->sThumbRX = whammy;
-        gamepad->sThumbRY = js->lRz;
+        // limit analog response poll rate as GH3 does not like getting updates too quick
+        clock_t now = clock();
+        if (now - caps->time > (CLOCKS_PER_SEC / 100) || caps->subtype != XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE)
+        {
+            caps->time = now;
+            /* Axes */
+            gamepad->sThumbLX = js->lX;
+            gamepad->sThumbLY = -js->lY;
+            gamepad->sThumbRX = whammy;
+            gamepad->sThumbRY = js->lRz;
+        }
     }
     else
     {
-        /* Axes */
-        gamepad->sThumbLX = js->lX;
-        gamepad->sThumbLY = -js->lY;
-        if (caps->axes >= 4)
+        // limit analog response poll rate as GH3 does not like getting updates too quick
+        clock_t now = clock();
+        if (now - caps->time > (CLOCKS_PER_SEC / 100) || caps->subtype != XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE)
         {
-            gamepad->sThumbRX = js->lRx;
-            gamepad->sThumbRY = -js->lRy;
-        }
-        else
-        {
-            gamepad->sThumbRX = gamepad->sThumbRY = 0;
-        }
+            caps->time = now;
+            /* Axes */
+            gamepad->sThumbLX = js->lX;
+            gamepad->sThumbLY = -js->lY;
+            if (caps->axes >= 4)
+            {
+                gamepad->sThumbRX = js->lRx;
+                gamepad->sThumbRY = -js->lRy;
+            }
+            else
+            {
+                gamepad->sThumbRX = gamepad->sThumbRY = 0;
+            }
 
-        /* Both triggers */
-        if (caps->axes >= 6)
-        {
-            gamepad->bLeftTrigger = (255 * (long)(js->lZ + 32767)) / 65535;
-            gamepad->bRightTrigger = (255 * (long)(js->lRz + 32767)) / 65535;
+            /* Both triggers */
+            if (caps->axes >= 6)
+            {
+                gamepad->bLeftTrigger = (255 * (long)(js->lZ + 32767)) / 65535;
+                gamepad->bRightTrigger = (255 * (long)(js->lRz + 32767)) / 65535;
+            }
+            else
+                gamepad->bLeftTrigger = gamepad->bRightTrigger = 0;
         }
-        else
-            gamepad->bLeftTrigger = gamepad->bRightTrigger = 0;
     }
 }
 
