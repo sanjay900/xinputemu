@@ -7,7 +7,7 @@
 #include <stdio.h>
 
 #define DIRECTINPUT_VERSION 0x0800
-// #define DEBUG
+#define DEBUG
 #include "dinput.h"
 
 #ifndef TRACE
@@ -106,13 +106,13 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         MAKELONG(0x0e6f, 0x024a) /* PS4 Riffmaster */,
         MAKELONG(0x0e6f, 0x0173) /* PDP Jaguar */,
         MAKELONG(0x0738, 0x8261) /* MadCatz Stratocaster */,
-        MAKELONG(0x3651, 0x5500) /* CRKD SG */,
-        MAKELONG(0x3651, 0x1500) /* CRKD SG */
+        MAKELONG(0x3651, 0x5500) /* PS4 CRKD SG - Dongle */,
+        MAKELONG(0x3651, 0x1500) /* PS4 CRKD SG - Wired */
     };
     static const unsigned long ps5_products[] = {
         MAKELONG(0x0e6f, 0x0249) /* PS5 Riffmaster */,
-        MAKELONG(0x3651, 0x5600) /* CRKD SG */,
-        MAKELONG(0x3651, 0x1600) /* CRKD SG */
+        MAKELONG(0x3651, 0x5600) /* PS5 CRKD SG - Dongle */,
+        MAKELONG(0x3651, 0x1600) /* PS5 CRKD SG - Wired */
     };
     static const unsigned long raphnet_wii_products[] = {
         MAKELONG(0x289b, 0x0080) /* 1-player WUSBMote v2.2 (w/advXarch) */,
@@ -147,8 +147,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         MAKELONG(0x1430, 0x0706) /* WoR Guitar */,
     };
     static const unsigned long rb_xinput_products[] = {
-        MAKELONG(0x1BAD, 0x0002) /* RB Guitar */,
-        MAKELONG(0x0738, 0x9806) /* Precision Bass */
+        MAKELONG(0x1BAD, 0x0002) /* RB Stratocaster */,
+        MAKELONG(0x0738, 0x9806) /* RB Precision Bass */
     };
     caps->windows = !(KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine") || KeyExists(HKEY_CURRENT_USER, L"Software\\Wine"));
 
