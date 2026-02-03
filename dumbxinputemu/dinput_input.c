@@ -4,6 +4,7 @@
 #include "hidsdi.h"
 #include "dumbxinputemu.h"
 #include <cguid.h>
+
 #include <stdio.h>
 
 #define DIRECTINPUT_VERSION 0x0800
@@ -44,7 +45,7 @@
 
 struct CapsFlags
 {
-    BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps4rb, ps5rb, ps3gh, rb360, gh360, windows, raphwii, raphpsx, seenwhammy;
+    BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps4rb, ps5rb, ps3gh, rb360, gh360, windows, macos, raphwii, raphpsx, seenwhammy, sdl;
     int axes, buttons, subtype;
 };
 
@@ -73,15 +74,52 @@ static struct
 static bool initialized = FALSE;
 static void dinput_start(void);
 
-static bool KeyExists(HKEY hKeyRoot, LPCWSTR subKey) {
+static bool dirExists(LPCWSTR path)
+{
+    DWORD attrs = GetFileAttributesW(path);
+    return (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY));
+}
+
+static bool IsMacos()
+{
+    LPCWSTR library = L"Z:\\Library";
+    if (dirExists(library))
+    {
+        return true;
+    }
+}
+
+static bool KeyExists(HKEY hKeyRoot, LPCWSTR subKey)
+{
     HKEY hKey;
     LONG result = RegOpenKeyExW(hKeyRoot, subKey, 0, KEY_READ, &hKey);
-    
-    if (result == ERROR_SUCCESS) {
+
+    if (result == ERROR_SUCCESS)
+    {
         RegCloseKey(hKey);
         return true;
-    } else {
+    }
+    else
+    {
         return false;
+    }
+}
+
+static bool SDLEnabled()
+{
+    uint32_t data;
+    size_t size = sizeof(data);
+    HKEY hKey;
+    LONG result = RegGetValueW(HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Services\\WineBus", L"Enable SDL", RRF_RT_DWORD, NULL, (LPDWORD)&data, (LPDWORD)&size);
+
+    if (result == ERROR_SUCCESS)
+    {
+        return data;
+    }
+    else
+    {
+        // SDL enabled by default
+        return true;
     }
 }
 
@@ -151,11 +189,32 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         MAKELONG(0x0738, 0x9806) /* RB Precision Bass */
     };
     caps->windows = !(KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine") || KeyExists(HKEY_CURRENT_USER, L"Software\\Wine"));
-
-    if (caps->windows) {
+    caps->macos = IsMacos();
+    if (caps->windows)
+    {
         TRACE("Running on windows\r\n");
-    } else {
+    }
+    else
+    {
         TRACE("Running on wine\r\n");
+        if (caps->macos)
+        {
+            TRACE("Running on macos\r\n");
+            // macos doesn't use sdl style mappings for santroller things
+            caps->sdl = false;
+        }
+        else
+        {
+            TRACE("Running on linux\r\n");
+            caps->sdl = SDLEnabled();
+            if (caps->sdl)
+            {
+                TRACE("SDL Enabled, you may have problems with tilt\r\n");
+            } else {
+                
+                TRACE("SDL Disabled\r\n");
+            }
+        }
     }
 
     int i;
@@ -198,11 +257,14 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         TRACE("Setting subtype to guitar!\n");
         TRACE("Santroller guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-        if (caps->windows) {
+        if (caps->windows)
+        {
             // on windows, assume xinput
             caps->gh360 = true;
             TRACE("on windows, assuming xinput!\n");
-        } else {
+        }
+        else
+        {
             // on wine, assume hid
             caps->santroller = true;
             TRACE("on wine, assuming hid!\n");
@@ -232,7 +294,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     TRACE("axes: %08x\n", dinput_caps.dwAxes);
     TRACE("buttons: %08x\n", dinput_caps.dwButtons);
 
-    for (i = 0; i < sizeof(wireless_products) / sizeof(wireless_products[0]); i++) {
+    for (i = 0; i < sizeof(wireless_products) / sizeof(wireless_products[0]); i++)
+    {
         if (property.dwData == wireless_products[i])
         {
             caps->wireless = TRUE;
@@ -240,8 +303,9 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
             break;
         }
     }
-    
-    for (i = 0; i < sizeof(ps4_products) / sizeof(ps4_products[0]); i++) {
+
+    for (i = 0; i < sizeof(ps4_products) / sizeof(ps4_products[0]); i++)
+    {
         if (property.dwData == ps4_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
@@ -252,7 +316,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         }
     }
 
-    for (i = 0; i < sizeof(ps5_products) / sizeof(ps5_products[0]); i++) {
+    for (i = 0; i < sizeof(ps5_products) / sizeof(ps5_products[0]); i++)
+    {
         if (property.dwData == ps5_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
@@ -263,7 +328,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         }
     }
 
-    for (i = 0; i < sizeof(raphnet_wii_products) / sizeof(raphnet_wii_products[0]); i++) {
+    for (i = 0; i < sizeof(raphnet_wii_products) / sizeof(raphnet_wii_products[0]); i++)
+    {
         if (property.dwData == raphnet_wii_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
@@ -274,7 +340,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         }
     }
 
-    for (i = 0; i < sizeof(raphnet_ps2_products) / sizeof(raphnet_ps2_products[0]); i++) {
+    for (i = 0; i < sizeof(raphnet_ps2_products) / sizeof(raphnet_ps2_products[0]); i++)
+    {
         if (property.dwData == raphnet_ps2_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
@@ -285,7 +352,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         }
     }
 
-    for (i = 0; i < sizeof(rb_ps3_products) / sizeof(rb_ps3_products[0]); i++) {
+    for (i = 0; i < sizeof(rb_ps3_products) / sizeof(rb_ps3_products[0]); i++)
+    {
         if (property.dwData == rb_ps3_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
@@ -296,7 +364,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         }
     }
 
-    for (i = 0; i < sizeof(gh_ps3_products) / sizeof(gh_ps3_products[0]); i++) {
+    for (i = 0; i < sizeof(gh_ps3_products) / sizeof(gh_ps3_products[0]); i++)
+    {
         if (property.dwData == gh_ps3_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
@@ -307,7 +376,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         }
     }
 
-    for (i = 0; i < sizeof(gh_xinput_products) / sizeof(gh_xinput_products[0]); i++) {
+    for (i = 0; i < sizeof(gh_xinput_products) / sizeof(gh_xinput_products[0]); i++)
+    {
         if (property.dwData == gh_xinput_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
@@ -319,7 +389,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         }
     }
 
-    for (i = 0; i < sizeof(rb_xinput_products) / sizeof(rb_xinput_products[0]); i++) {
+    for (i = 0; i < sizeof(rb_xinput_products) / sizeof(rb_xinput_products[0]); i++)
+    {
         if (property.dwData == rb_xinput_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
@@ -384,7 +455,6 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         XINPUT_GAMEPAD_LEFT_THUMB,
         XINPUT_GAMEPAD_RIGHT_THUMB};
 
-    
     static const int santroller_buttons[] = {
         XINPUT_GAMEPAD_A,
         XINPUT_GAMEPAD_B,
@@ -424,8 +494,8 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         XINPUT_GAMEPAD_Y,
         XINPUT_GAMEPAD_X,
         XINPUT_GAMEPAD_LEFT_SHOULDER,
-        XINPUT_GAMEPAD_DPAD_DOWN,                      // tilt
-        XINPUT_GAMEPAD_START, // solo
+        XINPUT_GAMEPAD_DPAD_DOWN, // tilt
+        XINPUT_GAMEPAD_START,     // solo
         XINPUT_GAMEPAD_BACK,
         XINPUT_GAMEPAD_DPAD_UP,
         0x00,
@@ -440,8 +510,8 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         XINPUT_GAMEPAD_B,
         XINPUT_GAMEPAD_Y,
         XINPUT_GAMEPAD_START,
-        XINPUT_GAMEPAD_BACK, 
-        0x00, 
+        XINPUT_GAMEPAD_BACK,
+        0x00,
         0x00,
         0x00, // TILT
         XINPUT_GAMEPAD_A,
@@ -553,7 +623,7 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
             if (js->rgbButtons[i] & 0x80)
                 gamepad->wButtons |= ps3_gh_buttons[i];
     }
-    else if (caps->santroller)
+    else if (caps->santroller && !caps->sdl)
     {
         buttons = min(caps->buttons, sizeof(santroller_buttons) / sizeof(*santroller_buttons));
         for (i = 0; i < buttons; i++)
@@ -623,16 +693,20 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     else if (caps->rb360 && caps->windows)
     {
         LONG whammy = js->rglSlider[0];
-        if (whammy > INT16_MAX) {
+        if (whammy > INT16_MAX)
+        {
             whammy = INT16_MAX;
         }
-        if (whammy < INT16_MIN) {
+        if (whammy < INT16_MIN)
+        {
             whammy = INT16_MIN;
         }
-        if (whammy) {
+        if (whammy)
+        {
             caps->seenwhammy = true;
         }
-        if (!caps->seenwhammy) {
+        if (!caps->seenwhammy)
+        {
             whammy = INT16_MIN;
         }
         /* Axes */
@@ -644,16 +718,20 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     else if (caps->gh360 && caps->windows)
     {
         LONG whammy = js->rglSlider[0];
-        if (whammy > INT16_MAX) {
+        if (whammy > INT16_MAX)
+        {
             whammy = INT16_MAX;
         }
-        if (whammy < INT16_MIN) {
+        if (whammy < INT16_MIN)
+        {
             whammy = INT16_MIN;
         }
-        if (whammy) {
+        if (whammy)
+        {
             caps->seenwhammy = true;
         }
-        if (!caps->seenwhammy) {
+        if (!caps->seenwhammy)
+        {
             whammy = INT16_MIN;
         }
         /* Axes */
