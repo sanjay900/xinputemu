@@ -7,7 +7,7 @@
 #include <stdio.h>
 
 #define DIRECTINPUT_VERSION 0x0800
-#define DEBUG
+// #define DEBUG
 #include "dinput.h"
 
 #ifndef TRACE
@@ -384,6 +384,24 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         XINPUT_GAMEPAD_LEFT_THUMB,
         XINPUT_GAMEPAD_RIGHT_THUMB};
 
+    
+    static const int santroller_buttons[] = {
+        XINPUT_GAMEPAD_A,
+        XINPUT_GAMEPAD_B,
+        0x00,
+        XINPUT_GAMEPAD_X,
+        XINPUT_GAMEPAD_Y,
+        0x00,
+        XINPUT_GAMEPAD_LEFT_SHOULDER,
+        0x00,
+        0x00,
+        0x00,
+        XINPUT_GAMEPAD_BACK,
+        XINPUT_GAMEPAD_START,
+        XINPUT_GAMEPAD_GUIDE,
+        XINPUT_GAMEPAD_LEFT_THUMB,
+        XINPUT_GAMEPAD_RIGHT_THUMB};
+
     static const int ps3_buttons[] = {
         XINPUT_GAMEPAD_X,
         XINPUT_GAMEPAD_A,
@@ -406,10 +424,10 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         XINPUT_GAMEPAD_Y,
         XINPUT_GAMEPAD_X,
         XINPUT_GAMEPAD_LEFT_SHOULDER,
-        XINPUT_GAMEPAD_DPAD_UP,                      // tilt
+        XINPUT_GAMEPAD_DPAD_DOWN,                      // tilt
         XINPUT_GAMEPAD_START, // solo
         XINPUT_GAMEPAD_BACK,
-        XINPUT_GAMEPAD_DPAD_DOWN,
+        XINPUT_GAMEPAD_DPAD_UP,
         0x00,
         0x00,
         0x00,
@@ -534,6 +552,13 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         for (i = 0; i < buttons; i++)
             if (js->rgbButtons[i] & 0x80)
                 gamepad->wButtons |= ps3_gh_buttons[i];
+    }
+    else if (caps->santroller)
+    {
+        buttons = min(caps->buttons, sizeof(santroller_buttons) / sizeof(*santroller_buttons));
+        for (i = 0; i < buttons; i++)
+            if (js->rgbButtons[i] & 0x80)
+                gamepad->wButtons |= santroller_buttons[i];
     }
     else
     {
