@@ -560,7 +560,7 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     gamepad->dwPaddingReserved = 0;
     gamepad->wButtons = 0x0000;
     /* First the D-Pad which is recognized as a POV in dinput */
-    if (caps->pov)
+    if (caps->pov && !caps->raphwii && !caps->raphpsx)
     {
         switch (js->rgdwPOV[0])
         {
@@ -647,6 +647,10 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     }
     else if (caps->ps3rb)
     {
+        gamepad->sThumbLX = 0;
+        gamepad->sThumbLY = 0;
+        gamepad->sThumbRX = 0;
+        gamepad->sThumbRY = 0;
         gamepad->sThumbRX = (js->lZ);
         if (js->rgbButtons[5] & 0x80)
         {
@@ -659,6 +663,10 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     }
     else if (caps->raphwii)
     {
+        
+        gamepad->sThumbLX = 0;
+        gamepad->sThumbLY = 0;
+        gamepad->sThumbRY = 0;
         gamepad->sThumbRX = (js->lZ);
     }
     else if (caps->raphpsx)
@@ -675,16 +683,26 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     }
     else if (caps->ps4rb || caps->ps5rb)
     {
+        gamepad->sThumbLX = 0;
+        gamepad->sThumbLY = 0;
         gamepad->sThumbRX = (js->lZ);
         gamepad->sThumbRY = js->lRz;
     }
     else if (caps->ps3gh)
     {
+        gamepad->sThumbLX = 0;
+        gamepad->sThumbLY = 0;
+        gamepad->sThumbRX = 0;
+        gamepad->sThumbRY = 0;
         gamepad->sThumbRX = (js->lZ * 2) - 32768;
         gamepad->sThumbRY = map(js->lRy, 8192, -8192, -32767, 32767);
     }
     else if (caps->crkd)
     {
+        gamepad->sThumbLX = 0;
+        gamepad->sThumbLY = 0;
+        gamepad->sThumbRX = 0;
+        gamepad->sThumbRY = 0;
         // CRKD guitars have whammy on the Z axis (LT)
         gamepad->sThumbLX = gamepad->sThumbLY = gamepad->sThumbRY = 0;
         gamepad->sThumbRX = (js->lZ * 2) - 32768;
