@@ -1,6 +1,6 @@
 # Important stuff
 CFLAGS = 
-LIBS = -luuid -ldxguid -ldinput -ldinput8 -lhid -lcfgmgr32
+LIBS = -luuid -ldxguid -ldinput -ldinput8 -lhid -lcfgmgr32 -lwbemuuid -lole32 -loleaut32
 
 # (maybe) distro-specific stuff
 MINGW32 = i686-w64-mingw32
@@ -30,46 +30,52 @@ default: 32bit 64bit
 %.64.o: %.c
 	${GCC64} ${CFLAGS} ${INCLUDE_DIR64} ${LIB_DIR64} -c $? -o $@
 
+%.32.o: %.cpp
+	${GCC32} ${CFLAGS} ${INCLUDE_DIR32} ${LIB_DIR32} -c $? -o $@
+
+%.64.o: %.cpp
+	${GCC64} ${CFLAGS} ${INCLUDE_DIR64} ${LIB_DIR64} -c $? -o $@
+
 # ------ 32 bit
 
-build/32/xinput1_1.dll: xinput1_1/exports.def dumbxinputemu/dinput_input.32.o xinput1_1/xinput1_1.32.o
+build/32/xinput1_1.dll: xinput1_1/exports.def dumbxinputemu/isxinput.32.o dumbxinputemu/dinput_input.32.o xinput1_1/xinput1_1.32.o
 	mkdir -p build/32/
 	${GCC32} --shared ${CFLAGS} ${INCLUDE_DIR32} ${LIB_DIR32} $? ${LIBS} -o $@
 
-build/32/xinput1_2.dll: xinput1_2/exports.def dumbxinputemu/dinput_input.32.o xinput1_2/xinput1_2.32.o
+build/32/xinput1_2.dll: xinput1_2/exports.def dumbxinputemu/isxinput.32.o dumbxinputemu/dinput_input.32.o xinput1_2/xinput1_2.32.o
 	mkdir -p build/32/
 	${GCC32} --shared ${CFLAGS} ${INCLUDE_DIR32} ${LIB_DIR32} $? ${LIBS} -o $@
 
-build/32/xinput1_3.dll: xinput1_3/exports.def dumbxinputemu/dinput_input.32.o xinput1_3/xinput1_3.32.o
+build/32/xinput1_3.dll: xinput1_3/exports.def dumbxinputemu/isxinput.32.o dumbxinputemu/dinput_input.32.o xinput1_3/xinput1_3.32.o
 	mkdir -p build/32/
 	${GCC32} --shared ${CFLAGS} ${INCLUDE_DIR32} ${LIB_DIR32} $? ${LIBS} -o $@
 
-build/32/xinput1_4.dll: xinput1_4/exports.def dumbxinputemu/dinput_input.32.o xinput1_4/xinput1_4.32.o
+build/32/xinput1_4.dll: xinput1_4/exports.def dumbxinputemu/isxinput.32.o dumbxinputemu/dinput_input.32.o xinput1_4/xinput1_4.32.o
 	mkdir -p build/32/
 	${GCC32} --shared ${CFLAGS} ${INCLUDE_DIR32} ${LIB_DIR32} $? ${LIBS} -o $@
 
-build/32/xinput9_1_0.dll: xinput9_1_0/exports.def dumbxinputemu/dinput_input.32.o xinput9_1_0/xinput9_1_0.32.o
+build/32/xinput9_1_0.dll: xinput9_1_0/exports.def dumbxinputemu/isxinput.32.o dumbxinputemu/dinput_input.32.o xinput9_1_0/xinput9_1_0.32.o
 	mkdir -p build/32/
 	${GCC32} --shared ${CFLAGS} ${INCLUDE_DIR32} ${LIB_DIR32} $? ${LIBS} -o $@
 
 # ------ 64 bit
-build/64/xinput1_1.dll: xinput1_1/exports.def dumbxinputemu/dinput_input.64.o xinput1_1/xinput1_1.64.o
+build/64/xinput1_1.dll: xinput1_1/exports.def dumbxinputemu/isxinput.64.o dumbxinputemu/dinput_input.64.o xinput1_1/xinput1_1.64.o
 	mkdir -p build/64/
 	${GCC64} --shared ${CFLAGS} ${INCLUDE_DIR64} ${LIB_DIR64} $? ${LIBS} -o $@
 
-build/64/xinput1_2.dll: xinput1_2/exports.def dumbxinputemu/dinput_input.64.o xinput1_2/xinput1_2.64.o
+build/64/xinput1_2.dll: xinput1_2/exports.def dumbxinputemu/isxinput.64.o dumbxinputemu/dinput_input.64.o xinput1_2/xinput1_2.64.o
 	mkdir -p build/64/
 	${GCC64} --shared ${CFLAGS} ${INCLUDE_DIR64} ${LIB_DIR64} $? ${LIBS} -o $@
 
-build/64/xinput1_3.dll: xinput1_3/exports.def dumbxinputemu/dinput_input.64.o xinput1_3/xinput1_3.64.o
+build/64/xinput1_3.dll: xinput1_3/exports.def dumbxinputemu/isxinput.64.o dumbxinputemu/dinput_input.64.o xinput1_3/xinput1_3.64.o
 	mkdir -p build/64/
 	${GCC64} --shared ${CFLAGS} ${INCLUDE_DIR64} ${LIB_DIR64} $? ${LIBS} -o $@
 
-build/64/xinput1_4.dll: xinput1_4/exports.def dumbxinputemu/dinput_input.64.o xinput1_4/xinput1_4.64.o
+build/64/xinput1_4.dll: xinput1_4/exports.def dumbxinputemu/isxinput.64.o dumbxinputemu/dinput_input.64.o xinput1_4/xinput1_4.64.o
 	mkdir -p build/64/
 	${GCC64} --shared ${CFLAGS} ${INCLUDE_DIR64} ${LIB_DIR64} $? ${LIBS} -o $@
 
-build/64/xinput9_1_0.dll: xinput9_1_0/exports.def dumbxinputemu/dinput_input.64.o xinput9_1_0/xinput9_1_0.64.o
+build/64/xinput9_1_0.dll: xinput9_1_0/exports.def dumbxinputemu/isxinput.64.o dumbxinputemu/dinput_input.64.o xinput9_1_0/xinput9_1_0.64.o
 	mkdir -p build/64/
 	${GCC64} --shared ${CFLAGS} ${INCLUDE_DIR64} ${LIB_DIR64} $? ${LIBS} -o $@
 

@@ -4,6 +4,7 @@
 #include "hidsdi.h"
 #include "dumbxinputemu.h"
 #include <cguid.h>
+#include "isxinput.h"
 
 #include <stdio.h>
 
@@ -45,7 +46,7 @@
 
 struct CapsFlags
 {
-    BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps4rb, ps5rb, ps3gh, rb360, gh360, windows, macos, raphwii, raphpsx, seenwhammy, sdl;
+    BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps4rb, ps2gh, ps2, ps5rb, ps3gh, ps2needschecking, rb360, gh360, windows, macos, raphwii, raphpsx, seenwhammy, sdl;
     int axes, buttons, subtype;
 };
 
@@ -73,7 +74,7 @@ static struct
 
 static bool initialized = FALSE;
 static void dinput_start(void);
-
+static void dinput_update(int index);
 static bool dirExists(LPCWSTR path)
 {
     DWORD attrs = GetFileAttributesW(path);
@@ -123,10 +124,9 @@ static bool SDLEnabled()
     }
 }
 
-static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags *caps)
+static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags *caps, const GUID *guidProduct)
 {
     HRESULT hr;
-    DIPROPDWORD property;
     DIDEVCAPS dinput_caps;
     static const unsigned long wireless_products[] = {
         MAKELONG(0x045e, 0x0291) /* microsoft receiver */,
@@ -210,8 +210,10 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
             if (caps->sdl)
             {
                 TRACE("SDL Enabled, you may have problems with tilt\r\n");
-            } else {
-                
+            }
+            else
+            {
+
                 TRACE("SDL Disabled\r\n");
             }
         }
@@ -224,18 +226,8 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     if (FAILED(hr))
         return FALSE;
 
-    property.diph.dwSize = sizeof(property);
-    property.diph.dwHeaderSize = sizeof(property.diph);
-    property.diph.dwObj = 0;
-    property.diph.dwHow = DIPH_DEVICE;
-
-    hr = IDirectInputDevice_GetProperty(device, DIPROP_VIDPID, &property.diph);
-    if (FAILED(hr))
-        return FALSE;
-
     if (dinput_caps.dwAxes < 2 || dinput_caps.dwButtons < 8)
         return FALSE;
-
     caps->axes = dinput_caps.dwAxes;
     caps->buttons = dinput_caps.dwButtons;
     caps->wireless = FALSE;
@@ -244,69 +236,87 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
     caps->santroller = false;
     caps->crkd = false;
+    caps->ps2 = false;
     caps->ps3rb = false;
     caps->ps4rb = false;
     caps->ps5rb = false;
     caps->ps3gh = false;
     caps->rb360 = false;
     caps->gh360 = false;
+    caps->ps2gh = false;
+    caps->ps2 = false;
+    caps->ps2needschecking = false;
     caps->seenwhammy = false;
 
-    if (property.dwData == MAKELONG(0x1209, 0x2882))
+    if (dinput_caps.dwAxes == 0x02 && dinput_caps.dwButtons == 0x0a && caps->windows && IsXInputDevice(guidProduct))
     {
         TRACE("Setting subtype to guitar!\n");
-        TRACE("Santroller guitar detected!\n");
+        TRACE("Assuming xinput controller with 2 axes and 10 buttons is a gh guitar \n");
+        caps->gh360 = true;
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-        if (caps->windows)
-        {
-            // on windows, assume xinput
-            caps->gh360 = true;
-            TRACE("on windows, assuming xinput!\n");
-        }
-        else
-        {
-            // on wine, assume hid
-            caps->santroller = true;
-            TRACE("on wine, assuming hid!\n");
-        }
     }
-    if (property.dwData == MAKELONG(0x045e, 0x028e))
+    else if (dinput_caps.dwAxes == 0x03 && dinput_caps.dwButtons == 0x0a && caps->windows && IsXInputDevice(guidProduct))
     {
         TRACE("Setting subtype to guitar!\n");
-        TRACE("CRKD guitar detected!\n");
+        TRACE("Assuming xinput controller with 3 axes and 10 buttons is a rb guitar \n");
+        caps->rb360 = true;
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-        caps->crkd = true;
     }
-    if (property.dwData == MAKELONG(0x1BAD, 0x0719))
+    else if (guidProduct->Data1 == MAKELONG(0x1209, 0x2882))
+    {
+        TRACE("Setting subtype to guitar!\n");
+        TRACE("Santroller hid guitar detected!\n");
+        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+        caps->santroller = true;
+    }
+    // if (guidProduct->Data1 == MAKELONG(0x045e, 0x028e))
+    // {
+    //     TRACE("Setting subtype to guitar!\n");
+    //     TRACE("CRKD guitar detected!\n");
+    //     caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+    //     caps->crkd = true;
+    // }
+    if (guidProduct->Data1 == MAKELONG(0x1BAD, 0x0719))
     {
         TRACE("Setting subtype to guitar!\n");
         TRACE("clipper / rb4instrumentmapper detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
     }
 
-    if (property.dwData == MAKELONG(0x1BAD, 0x0130))
+    if (guidProduct->Data1 == MAKELONG(0x2563, 0x0575))
+    {
+        TRACE("PS2 usb adapter detected!\n");
+        caps->ps2 = true;
+        caps->ps2needschecking = true;
+    }
+
+    if (guidProduct->Data1 == MAKELONG(0x1BAD, 0x0130))
     {
         TRACE("Setting subtype to drums!\n");
         TRACE("XInput drums detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
     }
-    TRACE("vidpid: %08x\n", property.dwData);
+    TRACE("vidpid: %08x\n", guidProduct->Data1);
+    TRACE("vidpid: %08x\n", guidProduct->Data1);
     TRACE("axes: %08x\n", dinput_caps.dwAxes);
     TRACE("buttons: %08x\n", dinput_caps.dwButtons);
-
-    for (i = 0; i < sizeof(wireless_products) / sizeof(wireless_products[0]); i++)
+    // only force wireless adapters to act as guitars on
+    if (!caps->windows)
     {
-        if (property.dwData == wireless_products[i])
+        for (i = 0; i < sizeof(wireless_products) / sizeof(wireless_products[0]); i++)
         {
-            caps->wireless = TRUE;
-            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-            break;
+            if (guidProduct->Data1 == wireless_products[i])
+            {
+                caps->wireless = TRUE;
+                caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+                break;
+            }
         }
     }
 
     for (i = 0; i < sizeof(ps4_products) / sizeof(ps4_products[0]); i++)
     {
-        if (property.dwData == ps4_products[i])
+        if (guidProduct->Data1 == ps4_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
             TRACE("PS4 guitar detected!\n");
@@ -318,7 +328,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
 
     for (i = 0; i < sizeof(ps5_products) / sizeof(ps5_products[0]); i++)
     {
-        if (property.dwData == ps5_products[i])
+        if (guidProduct->Data1 == ps5_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
             TRACE("PS5 guitar detected!\n");
@@ -330,7 +340,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
 
     for (i = 0; i < sizeof(raphnet_wii_products) / sizeof(raphnet_wii_products[0]); i++)
     {
-        if (property.dwData == raphnet_wii_products[i])
+        if (guidProduct->Data1 == raphnet_wii_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
             TRACE("Raphnet wusbmote detected!\n");
@@ -342,7 +352,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
 
     for (i = 0; i < sizeof(raphnet_ps2_products) / sizeof(raphnet_ps2_products[0]); i++)
     {
-        if (property.dwData == raphnet_ps2_products[i])
+        if (guidProduct->Data1 == raphnet_ps2_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
             TRACE("Raphnet ps2 adapter detected!\n");
@@ -354,7 +364,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
 
     for (i = 0; i < sizeof(rb_ps3_products) / sizeof(rb_ps3_products[0]); i++)
     {
-        if (property.dwData == rb_ps3_products[i])
+        if (guidProduct->Data1 == rb_ps3_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
             TRACE("RB PS3 guitar detected!\n");
@@ -366,7 +376,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
 
     for (i = 0; i < sizeof(gh_ps3_products) / sizeof(gh_ps3_products[0]); i++)
     {
-        if (property.dwData == gh_ps3_products[i])
+        if (guidProduct->Data1 == gh_ps3_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
             TRACE("GH PS3 guitar detected!\n");
@@ -378,7 +388,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
 
     for (i = 0; i < sizeof(gh_xinput_products) / sizeof(gh_xinput_products[0]); i++)
     {
-        if (property.dwData == gh_xinput_products[i])
+        if (guidProduct->Data1 == gh_xinput_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
             TRACE("XInput GH guitar detected!\n");
@@ -391,7 +401,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
 
     for (i = 0; i < sizeof(rb_xinput_products) / sizeof(rb_xinput_products[0]); i++)
     {
-        if (property.dwData == rb_xinput_products[i])
+        if (guidProduct->Data1 == rb_xinput_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
             TRACE("XInput RB guitar detected!\n");
@@ -471,6 +481,40 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         XINPUT_GAMEPAD_GUIDE,
         XINPUT_GAMEPAD_LEFT_THUMB,
         XINPUT_GAMEPAD_RIGHT_THUMB};
+
+    static const int ps2_gh_buttons[] = {
+        XINPUT_GAMEPAD_Y,
+        XINPUT_GAMEPAD_B,
+        XINPUT_GAMEPAD_X,
+        XINPUT_GAMEPAD_LEFT_SHOULDER,
+        0x00,
+        0x00, // tilt
+        0x00, // solo
+        XINPUT_GAMEPAD_A,
+        XINPUT_GAMEPAD_BACK,
+        XINPUT_GAMEPAD_START,
+        0x00,
+        0x00,
+        0x00
+
+    };
+
+    static const int ps2_buttons[] = {
+        XINPUT_GAMEPAD_Y,
+        XINPUT_GAMEPAD_B,
+        XINPUT_GAMEPAD_A,
+        XINPUT_GAMEPAD_X,
+        XINPUT_GAMEPAD_LEFT_SHOULDER,
+        XINPUT_GAMEPAD_RIGHT_SHOULDER,
+        0x00, // l2
+        0x00, // r2
+        XINPUT_GAMEPAD_BACK,
+        XINPUT_GAMEPAD_START,
+        0x00,
+        0x00,
+        0x00
+
+    };
 
     static const int ps3_buttons[] = {
         XINPUT_GAMEPAD_X,
@@ -586,9 +630,40 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
             gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_UP;
         }
     }
-
+    if (caps->ps2needschecking)
+    {
+        // can only check after we have seen an input
+        if (gamepad->wButtons || js->lX || js->lY || js->lZ || js->lRx || js->lRy || js->lRz)
+        {
+            caps->ps2needschecking = false;
+            TRACE("pov: %d\r\n", gamepad->wButtons & XINPUT_GAMEPAD_DPAD_LEFT);
+            if (gamepad->wButtons & XINPUT_GAMEPAD_DPAD_LEFT)
+            {
+                caps->ps2gh = true;
+                caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+                TRACE("Setting subtype to guitar!\n");
+                TRACE("PS2 guitar detected!\n");
+            }
+        }
+    }
     /* Buttons */
-    if (caps->raphwii)
+    if (caps->ps2gh)
+    {
+        // gh guitars hold dpad left so we need to mask that out
+        gamepad->wButtons &= ~XINPUT_GAMEPAD_DPAD_LEFT;
+        buttons = min(caps->buttons, sizeof(ps2_gh_buttons) / sizeof(*ps2_gh_buttons));
+        for (i = 0; i < buttons; i++)
+            if (js->rgbButtons[i] & 0x80)
+                gamepad->wButtons |= ps2_gh_buttons[i];
+    }
+    else if (caps->ps2)
+    {
+        buttons = min(caps->buttons, sizeof(ps2_buttons) / sizeof(*ps2_buttons));
+        for (i = 0; i < buttons; i++)
+            if (js->rgbButtons[i] & 0x80)
+                gamepad->wButtons |= ps2_buttons[i];
+    }
+    else if (caps->raphwii)
     {
         buttons = min(caps->buttons, sizeof(raph_wii_buttons) / sizeof(*raph_wii_buttons));
         for (i = 0; i < buttons; i++)
@@ -637,7 +712,14 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
             if (js->rgbButtons[i] & 0x80)
                 gamepad->wButtons |= xbox_buttons[i];
     }
-    if (caps->santroller)
+    if (caps->ps2gh)
+    {
+        gamepad->sThumbLX = 0;
+        gamepad->sThumbLY = 0;
+        gamepad->sThumbRX = INT16_MIN;
+        gamepad->sThumbRY = 0;
+    }
+    else if (caps->santroller)
     {
         // Santroller guitars have whammy and slider flipped in their HID reports
         gamepad->sThumbLX = -js->lY;
@@ -663,7 +745,7 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     }
     else if (caps->raphwii)
     {
-        
+
         gamepad->sThumbLX = 0;
         gamepad->sThumbLY = 0;
         gamepad->sThumbRY = 0;
@@ -879,7 +961,7 @@ static BOOL CALLBACK dinput_enum_callback(const DIDEVICEINSTANCEA *instance, voi
     if (FAILED(hr))
         return DIENUM_CONTINUE;
 
-    if (!dinput_is_good(device, &controllers[dinput.mapped].caps))
+    if (!dinput_is_good(device, &controllers[dinput.mapped].caps, &instance->guidProduct))
     {
         IDirectInput_Release(device);
         return DIENUM_CONTINUE;
@@ -1047,6 +1129,10 @@ DWORD dumb_XInputGetStateEx(DWORD index, XINPUT_STATE_EX *state_ex, DWORD caller
         return ERROR_DEVICE_NOT_CONNECTED;
 
     dinput_update(index);
+    if (controllers[index].caps.ps2needschecking)
+    {
+        return ERROR_DEVICE_NOT_CONNECTED;
+    }
     // broforce does not pass a correct XINPUT_STATE_EX, so only copy the old struct size
     *state_ex = controllers[index].state_ex;
 
@@ -1125,7 +1211,6 @@ DWORD dumb_XInputGetCapabilities(DWORD index, DWORD flags,
         return ERROR_DEVICE_NOT_CONNECTED;
 
     capabilities->Type = XINPUT_DEVTYPE_GAMEPAD;
-    capabilities->SubType = controllers[index].caps.subtype;
 
     capabilities->Flags = 0;
     if (controllers[index].caps.jedi)
@@ -1135,6 +1220,7 @@ DWORD dumb_XInputGetCapabilities(DWORD index, DWORD flags,
 
     dinput_update(index);
 
+    capabilities->SubType = controllers[index].caps.subtype;
     capabilities->Vibration = controllers[index].vibration;
     capabilities->Gamepad = *(XINPUT_GAMEPAD *)&controllers[index].state_ex.Gamepad;
 
