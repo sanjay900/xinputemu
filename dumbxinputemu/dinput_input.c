@@ -284,7 +284,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
         caps->santroller = true;
     }
-    else if (caps->windows && dinput_caps.dwAxes == 0x05)
+    else if (caps->windows && dinput_caps.dwAxes == 0x05 && IsXInputDevice(guidProduct))
     {
         TRACE("Gamepad found, ignoring dinput!\n");
         return false;
