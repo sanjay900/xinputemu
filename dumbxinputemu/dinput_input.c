@@ -9,7 +9,7 @@
 #include <stdio.h>
 
 #define DIRECTINPUT_VERSION 0x0800
-// #define DEBUG
+#define DEBUG
 #include "dinput.h"
 
 #ifndef TRACE
@@ -53,6 +53,7 @@ struct CapsFlags
 static struct ControllerMap
 {
     LPDIRECTINPUTDEVICE8A device;
+    int xinput_index;
     BOOL connected, acquired;
     struct CapsFlags caps;
     XINPUT_STATE_EX state_ex;
@@ -71,7 +72,21 @@ static struct
 } dinput;
 
 /* ========================= Internal functions ============================= */
+typedef DWORD(WINAPI *_XInputGetCapabilities)(
+    _In_ DWORD dwUserIndex,
+    _In_ DWORD dwFlags,
+    _Out_ XINPUT_CAPABILITIES *pCapabilities
 
+);
+
+typedef DWORD(WINAPI *_XInputGetState)(
+    _In_ DWORD dwUserIndex,
+    _Out_ XINPUT_STATE *pState
+
+);
+
+_XInputGetState ProcXInputGetState;
+_XInputGetCapabilities ProcXInputGetCapabilities;
 static bool initialized = FALSE;
 static void dinput_start(void);
 static void dinput_update(int index);
@@ -268,6 +283,11 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         TRACE("Santroller hid guitar detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
         caps->santroller = true;
+    }
+    else if (caps->windows && dinput_caps.dwAxes == 0x05)
+    {
+        TRACE("Gamepad found, ignoring dinput!\n");
+        return false;
     }
     // if (guidProduct->Data1 == MAKELONG(0x045e, 0x028e))
     // {
@@ -861,6 +881,19 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
             gamepad->bLeftTrigger = (255 * (long)(js->lZ + 32767)) / 65535;
             gamepad->bRightTrigger = (255 * (long)(js->lRz + 32767)) / 65535;
         }
+        else if (caps->axes >= 5)
+        {
+            // DInput combines the triggers, so we gotta split it
+            gamepad->bLeftTrigger = gamepad->bRightTrigger = 0;
+            if (js->lZ < 0)
+            {
+                gamepad->bLeftTrigger = (255 * (long)(-js->lZ)) / 32767;
+            }
+            else
+            {
+                gamepad->bRightTrigger = (255 * (long)(js->lZ)) / 32767;
+            }
+        }
         else
             gamepad->bLeftTrigger = gamepad->bRightTrigger = 0;
     }
@@ -973,6 +1006,7 @@ static BOOL CALLBACK dinput_enum_callback(const DIDEVICEINSTANCEA *instance, voi
         return DIENUM_CONTINUE;
     }
 
+    controllers[dinput.mapped].xinput_index = -1;
     controllers[dinput.mapped].connected = TRUE;
     controllers[dinput.mapped].device = device;
     dinput.mapped++;
@@ -986,6 +1020,9 @@ static void dinput_start(void)
     if (initialized)
         return;
     initialized = TRUE;
+    HINSTANCE hinstLib;
+    BOOL fFreeResult, fRunTimeLinkSuccess = FALSE;
+
 #ifdef DEBUG
     CONSOLE_SCREEN_BUFFER_INFO csbi;
 
@@ -1016,7 +1053,61 @@ static void dinput_start(void)
 
     setbuf(stdout, NULL);
 #endif
+    if (!(KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine") || KeyExists(HKEY_CURRENT_USER, L"Software\\Wine")))
+    {
+        // Get a handle to the DLL module.
 
+        hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_4.dll");
+        if (hinstLib == NULL)
+        {
+            hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_3.dll");
+        }
+        if (hinstLib == NULL)
+        {
+            hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_2.dll");
+        }
+        if (hinstLib == NULL)
+        {
+            hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_1.dll");
+        }
+        if (hinstLib == NULL)
+        {
+            hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput9_1_0.dll");
+        }
+
+        // If the handle is valid, try to get the function address.
+
+        if (hinstLib != NULL)
+        {
+            TRACE("found dll\r\n");
+            ProcXInputGetState = (_XInputGetState)GetProcAddress(hinstLib, "XInputGetState");
+            ProcXInputGetCapabilities = (_XInputGetCapabilities)GetProcAddress(hinstLib, "XInputGetCapabilities");
+
+            // If the function address is valid, call the function.
+
+            if (NULL != XInputGetState && NULL != XInputGetCapabilities)
+            {
+                fRunTimeLinkSuccess = TRUE;
+                printf("found procs\r\n");
+                for (int i = 0; i < 4; i++)
+                {
+                    XINPUT_CAPABILITIES caps;
+                    if ((ProcXInputGetCapabilities)(i, 0, &caps) != ERROR_DEVICE_NOT_CONNECTED && caps.SubType == XINPUT_DEVSUBTYPE_GAMEPAD)
+                    {
+                        printf("found xinput gamepad, proxying\r\n");
+                        controllers[dinput.mapped].xinput_index = i;
+                        controllers[dinput.mapped].connected = TRUE;
+                        dinput.mapped++;
+                    }
+                }
+            }
+        }
+        else
+        {
+
+            TRACE("unable to find xinput1_3\r\n");
+        }
+    }
     hr = DirectInput8Create(GetModuleHandleA(NULL), 0x0800, &IID_IDirectInput8A,
                             (void **)&dinput.iface, NULL);
     if (FAILED(hr))
@@ -1126,7 +1217,28 @@ DWORD dumb_XInputGetStateEx(DWORD index, XINPUT_STATE_EX *state_ex, DWORD caller
     if (index >= XUSER_MAX_COUNT)
         return ERROR_BAD_ARGUMENTS;
     if (!controllers[index].connected)
+    {
         return ERROR_DEVICE_NOT_CONNECTED;
+    }
+
+    if (controllers[index].xinput_index != -1)
+    {
+        union
+        {
+            XINPUT_STATE state;
+            XINPUT_STATE_EX state_ex;
+        } xinput;
+        int ret = (ProcXInputGetState)(controllers[index].xinput_index, &xinput.state);
+        if (ret == ERROR_SUCCESS)
+        {
+            *state_ex = xinput.state_ex;
+        }
+        if (ret == ERROR_DEVICE_NOT_CONNECTED)
+        {
+            controllers[index].connected = false;
+        }
+        return ret;
+    }
 
     dinput_update(index);
     if (controllers[index].caps.ps2needschecking)
@@ -1209,6 +1321,16 @@ DWORD dumb_XInputGetCapabilities(DWORD index, DWORD flags,
         return ERROR_BAD_ARGUMENTS;
     if (!controllers[index].connected)
         return ERROR_DEVICE_NOT_CONNECTED;
+
+    if (controllers[index].xinput_index != -1)
+    {
+        int ret = (ProcXInputGetCapabilities)(controllers[index].xinput_index, flags, capabilities);
+        if (ret == ERROR_DEVICE_NOT_CONNECTED)
+        {
+            controllers[index].connected = false;
+        }
+        return ret;
+    }
 
     capabilities->Type = XINPUT_DEVTYPE_GAMEPAD;
 
