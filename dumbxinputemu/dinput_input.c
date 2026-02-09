@@ -9,7 +9,7 @@
 #include <stdio.h>
 
 #define DIRECTINPUT_VERSION 0x0800
-#define DEBUG
+// #define DEBUG
 #include "dinput.h"
 
 #ifndef TRACE
