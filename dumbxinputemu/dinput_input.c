@@ -79,6 +79,13 @@ typedef DWORD(WINAPI *_XInputGetCapabilities)(
 
 );
 
+typedef DWORD(WINAPI *_XInputGetCapabilitiesEx)(
+    _In_ DWORD unk,
+    _In_ DWORD dwUserIndex,
+    _In_ DWORD dwFlags,
+    _Out_ XINPUT_CAPABILITIES_EX *pCapabilities
+
+);
 typedef DWORD(WINAPI *_XInputGetState)(
     _In_ DWORD dwUserIndex,
     _Out_ XINPUT_STATE *pState
@@ -87,6 +94,7 @@ typedef DWORD(WINAPI *_XInputGetState)(
 
 _XInputGetState ProcXInputGetState;
 _XInputGetCapabilities ProcXInputGetCapabilities;
+_XInputGetCapabilitiesEx ProcXInputGetCapabilitiesEx;
 static bool initialized = FALSE;
 static void dinput_start(void);
 static void dinput_update(int index);
@@ -286,8 +294,12 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     }
     else if (caps->windows && dinput_caps.dwAxes == 0x05 && IsXInputDevice(guidProduct))
     {
-        TRACE("Gamepad found, ignoring dinput!\n");
-        return false;
+
+        if (guidProduct->Data1 != MAKELONG(0x1BAD, 0x0719))
+        {
+            TRACE("Gamepad found, ignoring dinput!\n");
+            return false;
+        }
     }
     // if (guidProduct->Data1 == MAKELONG(0x045e, 0x028e))
     // {
@@ -1021,7 +1033,6 @@ static void dinput_start(void)
         return;
     initialized = TRUE;
     HINSTANCE hinstLib;
-    BOOL fFreeResult, fRunTimeLinkSuccess = FALSE;
 
 #ifdef DEBUG
     CONSOLE_SCREEN_BUFFER_INFO csbi;
@@ -1056,10 +1067,11 @@ static void dinput_start(void)
     if (!(KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine") || KeyExists(HKEY_CURRENT_USER, L"Software\\Wine")))
     {
         // Get a handle to the DLL module.
-
+        bool hasEx = true;
         hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_4.dll");
         if (hinstLib == NULL)
         {
+            hasEx = false;
             hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_3.dll");
         }
         if (hinstLib == NULL)
@@ -1081,14 +1093,34 @@ static void dinput_start(void)
         {
             TRACE("found dll\r\n");
             ProcXInputGetState = (_XInputGetState)GetProcAddress(hinstLib, "XInputGetState");
+            ProcXInputGetCapabilitiesEx = (_XInputGetCapabilitiesEx)GetProcAddress(hinstLib, (LPCSTR)108);
             ProcXInputGetCapabilities = (_XInputGetCapabilities)GetProcAddress(hinstLib, "XInputGetCapabilities");
 
             // If the function address is valid, call the function.
 
-            if (NULL != XInputGetState && NULL != XInputGetCapabilities)
+            if (NULL != XInputGetState && NULL != XInputGetCapabilitiesEx && hasEx)
             {
-                fRunTimeLinkSuccess = TRUE;
-                printf("found procs\r\n");
+                for (int i = 0; i < 4; i++)
+                {
+                    XINPUT_CAPABILITIES_EX caps2;
+                    if ((ProcXInputGetCapabilitiesEx)(1, i, 0, &caps2) != ERROR_DEVICE_NOT_CONNECTED && caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GAMEPAD)
+                    {
+                        if (caps2.VendorId == 0x1BAD && caps2.ProductId == 0x0719)
+                        {
+                            // process clipper / rb4instrumentmapper / wiitarthing via dinput
+                            TRACE("Found clipper / rb4instrumentmapper / wiitarthing, not proxying!\n");
+                            continue;
+                        }
+                        TRACE("found xinput gamepad, proxying\r\n");
+                        controllers[dinput.mapped].xinput_index = i;
+                        controllers[dinput.mapped].connected = TRUE;
+                        dinput.mapped++;
+                    }
+                }
+            }
+            else if (NULL != XInputGetState && NULL != XInputGetCapabilities)
+            {
+                TRACE("found procs\r\n");
                 for (int i = 0; i < 4; i++)
                 {
                     XINPUT_CAPABILITIES caps;
