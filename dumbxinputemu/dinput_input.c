@@ -9,7 +9,7 @@
 #include <stdio.h>
 
 #define DIRECTINPUT_VERSION 0x0800
-// #define DEBUG
+#define DEBUG
 #include "dinput.h"
 
 #ifndef TRACE
@@ -295,7 +295,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     else if (caps->windows && dinput_caps.dwAxes == 0x05 && IsXInputDevice(guidProduct))
     {
 
-        if (guidProduct->Data1 != MAKELONG(0x1BAD, 0x0719))
+        if (guidProduct->Data1 != MAKELONG(0x1BAD, 0x0719) && guidProduct->Data1 != MAKELONG(0x1430, 0x4734))
         {
             TRACE("Gamepad found, ignoring dinput!\n");
             return false;
@@ -822,7 +822,7 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         gamepad->sThumbRX = (js->lZ * 2) - 32768;
         gamepad->bLeftTrigger = 0;
     }
-    else if (caps->rb360 && caps->windows)
+    else if (caps->rb360 && caps->windows && caps->axes == 0x03)
     {
         LONG whammy = js->rglSlider[0];
         if (whammy > INT16_MAX)
@@ -847,7 +847,7 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         gamepad->sThumbRX = whammy;
         gamepad->sThumbRY = js->lRz;
     }
-    else if (caps->gh360 && caps->windows)
+    else if (caps->gh360 && caps->windows && caps->axes == 0x02)
     {
         LONG whammy = js->rglSlider[0];
         if (whammy > INT16_MAX)
@@ -1105,10 +1105,17 @@ static void dinput_start(void)
                     XINPUT_CAPABILITIES_EX caps2;
                     if ((ProcXInputGetCapabilitiesEx)(1, i, 0, &caps2) != ERROR_DEVICE_NOT_CONNECTED && caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GAMEPAD)
                     {
+                        TRACE("xinput vid: %04x, pid: %04x!\n", caps2.VendorId, caps2.ProductId);
                         if (caps2.VendorId == 0x1BAD && caps2.ProductId == 0x0719)
                         {
                             // process clipper / rb4instrumentmapper / wiitarthing via dinput
-                            TRACE("Found clipper / rb4instrumentmapper / wiitarthing, not proxying!\n");
+                            TRACE("Found clipper / rb4instrumentmapper not proxying!\n");
+                            continue;
+                        }
+                        if (caps2.VendorId == 0x1430 && caps2.ProductId == 0x4734)
+                        {
+                            // process wiitarthing via dinput
+                            TRACE("Found wiitarthing, not proxying!\n");
                             continue;
                         }
                         TRACE("found xinput gamepad, proxying\r\n");
@@ -1126,7 +1133,7 @@ static void dinput_start(void)
                     XINPUT_CAPABILITIES caps;
                     if ((ProcXInputGetCapabilities)(i, 0, &caps) != ERROR_DEVICE_NOT_CONNECTED && caps.SubType == XINPUT_DEVSUBTYPE_GAMEPAD)
                     {
-                        printf("found xinput gamepad, proxying\r\n");
+                        TRACE("found xinput gamepad, proxying\r\n");
                         controllers[dinput.mapped].xinput_index = i;
                         controllers[dinput.mapped].connected = TRUE;
                         dinput.mapped++;
