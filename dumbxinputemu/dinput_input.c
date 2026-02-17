@@ -46,7 +46,7 @@
 
 struct CapsFlags
 {
-    BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps4rb, ps2gh, ps2, ps5rb, ps3gh, ps2needschecking, rb360, gh360, windows, macos, raphwii, raphpsx, seenwhammy, sdl;
+    BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps4rb, ps2gh, ps2, ps5rb, ps3gh, ps2needschecking, rb360, gh360, windows, macos, raphwii, raphpsx, seenwhammy, sdl, wiighlinux;
     int axes, buttons, subtype;
 };
 
@@ -147,8 +147,9 @@ static bool SDLEnabled()
     }
 }
 
-static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags *caps, const GUID *guidProduct)
+static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags *caps, const DIDEVICEINSTANCEA *instance)
 {
+    const GUID *guidProduct = &instance->guidProduct;
     HRESULT hr;
     DIDEVCAPS dinput_caps;
     static const unsigned long wireless_products[] = {
@@ -270,6 +271,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     caps->ps2 = false;
     caps->ps2needschecking = false;
     caps->seenwhammy = false;
+    caps->wiighlinux = false;
 
     if (dinput_caps.dwAxes == 0x02 && dinput_caps.dwButtons == 0x0a && caps->windows && IsXInputDevice(guidProduct))
     {
@@ -284,6 +286,22 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         TRACE("Assuming xinput controller with 3 axes and 10 buttons is a rb guitar \n");
         caps->rb360 = true;
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+    }
+    else if (guidProduct->Data1 == MAKELONG(0x057e, 0x0306))
+    {
+        TRACE("Wii controller detected!\n");
+        if (strcmp(instance->tszProductName, "Nintendo Wii Remote Guitar") == 0)
+        {
+            printf("found wii guitar\r\n");
+            caps->wiighlinux = true;
+            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+        }
+        // only care about the guitar peripheral
+        if (strcmp(instance->tszProductName, "Nintendo Wii Remote") == 0)
+        {
+            printf("found wii remote, ignoring\r\n");
+            return FALSE;
+        }
     }
     else if (guidProduct->Data1 == MAKELONG(0x1209, 0x2882))
     {
@@ -484,6 +502,16 @@ long map(long x, long in_min, long in_max, long out_min, long out_max)
 
 static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepad, struct CapsFlags *caps)
 {
+    static const int wii_linux_gh_buttons[] = {
+        XINPUT_GAMEPAD_BACK,
+        XINPUT_GAMEPAD_START,
+        XINPUT_GAMEPAD_DPAD_UP,
+        XINPUT_GAMEPAD_DPAD_DOWN,
+        XINPUT_GAMEPAD_A,
+        XINPUT_GAMEPAD_B,
+        XINPUT_GAMEPAD_Y,
+        XINPUT_GAMEPAD_X,
+        XINPUT_GAMEPAD_LEFT_SHOULDER};
     static const int xbox_buttons[] = {
         XINPUT_GAMEPAD_A,
         XINPUT_GAMEPAD_B,
@@ -679,7 +707,14 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         }
     }
     /* Buttons */
-    if (caps->ps2gh)
+    if (caps->wiighlinux)
+    {
+        buttons = min(caps->buttons, sizeof(wii_linux_gh_buttons) / sizeof(*wii_linux_gh_buttons));
+        for (i = 0; i < buttons; i++)
+            if (js->rgbButtons[i] & 0x80)
+                gamepad->wButtons |= wii_linux_gh_buttons[i];
+    }
+    else if (caps->ps2gh)
     {
         // gh guitars hold dpad left so we need to mask that out
         gamepad->wButtons &= ~XINPUT_GAMEPAD_DPAD_LEFT;
@@ -1006,7 +1041,7 @@ static BOOL CALLBACK dinput_enum_callback(const DIDEVICEINSTANCEA *instance, voi
     if (FAILED(hr))
         return DIENUM_CONTINUE;
 
-    if (!dinput_is_good(device, &controllers[dinput.mapped].caps, &instance->guidProduct))
+    if (!dinput_is_good(device, &controllers[dinput.mapped].caps, instance))
     {
         IDirectInput_Release(device);
         return DIENUM_CONTINUE;
