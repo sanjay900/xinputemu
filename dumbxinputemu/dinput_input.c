@@ -4,8 +4,8 @@
 #include "hidsdi.h"
 #include "dumbxinputemu.h"
 #include <cguid.h>
-#include "isxinput.h"
-
+#include <hidapi.h>
+#include <hidapi_winapi.h>
 #include <stdio.h>
 
 #define DIRECTINPUT_VERSION 0x0800
@@ -96,6 +96,7 @@ _XInputGetState ProcXInputGetState;
 _XInputGetCapabilities ProcXInputGetCapabilities;
 _XInputGetCapabilitiesEx ProcXInputGetCapabilitiesEx;
 static bool initialized = FALSE;
+static bool foundDll = FALSE;
 static void dinput_start(void);
 static void dinput_update(int index);
 static bool dirExists(LPCWSTR path)
@@ -145,6 +146,11 @@ static bool SDLEnabled()
         // SDL enabled by default
         return true;
     }
+}
+
+bool IsXInputDevice(const GUID *guid)
+{
+    return false;
 }
 
 static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags *caps, const DIDEVICEINSTANCEA *instance)
@@ -250,7 +256,7 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     if (FAILED(hr))
         return FALSE;
 
-    if (dinput_caps.dwAxes < 2 || dinput_caps.dwButtons < 8)
+    if ((dinput_caps.dwAxes < 2 || dinput_caps.dwButtons < 8) && guidProduct->Data1 != MAKELONG(0x057e, 0x0306))
         return FALSE;
     caps->axes = dinput_caps.dwAxes;
     caps->buttons = dinput_caps.dwButtons;
@@ -290,17 +296,18 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     else if (guidProduct->Data1 == MAKELONG(0x057e, 0x0306))
     {
         TRACE("Wii controller detected!\n");
-        if (strcmp(instance->tszProductName, "Nintendo Wii Remote Guitar") == 0)
+        if (dinput_caps.dwButtons == 9)
         {
             printf("found wii guitar\r\n");
             caps->wiighlinux = true;
             caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
         }
-        // only care about the guitar peripheral
-        if (strcmp(instance->tszProductName, "Nintendo Wii Remote") == 0)
+        else if (dinput_caps.dwAxes)
         {
-            printf("found wii remote, ignoring\r\n");
-            return FALSE;
+        }
+        else
+        {
+            return false;
         }
     }
     else if (guidProduct->Data1 == MAKELONG(0x1209, 0x2882))
@@ -346,10 +353,6 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         TRACE("XInput drums detected!\n");
         caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
     }
-    TRACE("vidpid: %08x\n", guidProduct->Data1);
-    TRACE("vidpid: %08x\n", guidProduct->Data1);
-    TRACE("axes: %08x\n", dinput_caps.dwAxes);
-    TRACE("buttons: %08x\n", dinput_caps.dwButtons);
     // only force wireless adapters to act as guitars on
     if (!caps->windows)
     {
@@ -461,6 +464,11 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
             break;
         }
     }
+    TRACE("vidpid: %08x\n", guidProduct->Data1);
+    TRACE("vidpid: %08x\n", guidProduct->Data1);
+    TRACE("axes: %08x\n", dinput_caps.dwAxes);
+    TRACE("buttons: %08x\n", dinput_caps.dwButtons);
+    TRACE("hats: %08x\n", dinput_caps.dwPOVs);
 
     return TRUE;
 }
@@ -503,15 +511,15 @@ long map(long x, long in_min, long in_max, long out_min, long out_max)
 static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepad, struct CapsFlags *caps)
 {
     static const int wii_linux_gh_buttons[] = {
-        XINPUT_GAMEPAD_BACK,
-        XINPUT_GAMEPAD_START,
-        XINPUT_GAMEPAD_DPAD_UP,
-        XINPUT_GAMEPAD_DPAD_DOWN,
         XINPUT_GAMEPAD_A,
         XINPUT_GAMEPAD_B,
         XINPUT_GAMEPAD_Y,
         XINPUT_GAMEPAD_X,
-        XINPUT_GAMEPAD_LEFT_SHOULDER};
+        XINPUT_GAMEPAD_LEFT_SHOULDER,
+        XINPUT_GAMEPAD_BACK,
+        XINPUT_GAMEPAD_START,
+        XINPUT_GAMEPAD_DPAD_UP,
+        XINPUT_GAMEPAD_DPAD_DOWN};
     static const int xbox_buttons[] = {
         XINPUT_GAMEPAD_A,
         XINPUT_GAMEPAD_B,
@@ -785,6 +793,20 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         gamepad->sThumbLY = 0;
         gamepad->sThumbRX = INT16_MIN;
         gamepad->sThumbRY = 0;
+    }
+    else if (caps->wiighlinux)
+    {
+        printf("%d ", js->lX);
+        printf("%d ", js->lY);
+        printf("%d ", js->lZ);
+        printf("%d ", js->lRx);
+        printf("%d ", js->lRy);
+        printf("%d ", js->lRz);
+        for (int i = 0; i < 4; i++)
+        {
+            printf("%d ", js->rgdwPOV[i]);
+        }
+        printf("\r\n");
     }
     else if (caps->santroller)
     {
@@ -1061,6 +1083,88 @@ static BOOL CALLBACK dinput_enum_callback(const DIDEVICEINSTANCEA *instance, voi
     return DIENUM_CONTINUE;
 }
 
+const char *hid_bus_name(hid_bus_type bus_type)
+{
+    static const char *const HidBusTypeName[] = {
+        "Unknown",
+        "USB",
+        "Bluetooth",
+        "I2C",
+        "SPI",
+    };
+
+    if ((int)bus_type < 0)
+        bus_type = HID_API_BUS_UNKNOWN;
+    if ((int)bus_type >= (int)(sizeof(HidBusTypeName) / sizeof(HidBusTypeName[0])))
+        bus_type = HID_API_BUS_UNKNOWN;
+
+    return HidBusTypeName[bus_type];
+}
+
+void print_device(struct hid_device_info *cur_dev)
+{
+    printf("Device Found\n  type: %04hx %04hx\n  path: %s\n  serial_number: %ls", cur_dev->vendor_id, cur_dev->product_id, cur_dev->path, cur_dev->serial_number);
+    printf("\n");
+    printf("  Manufacturer: %ls\n", cur_dev->manufacturer_string);
+    printf("  Product:      %ls\n", cur_dev->product_string);
+    printf("  Release:      %hx\n", cur_dev->release_number);
+    printf("  Interface:    %d\n", cur_dev->interface_number);
+    printf("  Usage (page): 0x%hx (0x%hx)\n", cur_dev->usage, cur_dev->usage_page);
+    printf("  Bus type: %u (%s)\n", (unsigned)cur_dev->bus_type, hid_bus_name(cur_dev->bus_type));
+    printf("\n");
+    hid_device *device = hid_open_path(cur_dev->path);
+    uint8_t data[64];
+    int size = hid_read_timeout(device, data, sizeof(data), 100);
+    for (int i = 0; i < size; i++) {
+        printf("%02x, ", data[i]);
+    }
+    printf("\r\n");
+    if (device)
+    {
+        hid_close(device);
+    }
+}
+
+void print_hid_report_descriptor_from_path(const char *path)
+{
+    hid_device *device = hid_open_path(path);
+    if (device)
+    {
+        hid_close(device);
+    }
+    else
+    {
+        printf("  Report Descriptor: Unable to open device by path\n");
+    }
+}
+
+void print_devices(struct hid_device_info *cur_dev)
+{
+    for (; cur_dev; cur_dev = cur_dev->next)
+    {
+        print_device(cur_dev);
+    }
+}
+
+void print_devices_with_descriptor(struct hid_device_info *cur_dev)
+{
+    for (; cur_dev; cur_dev = cur_dev->next)
+    {
+        if (strstr(cur_dev->path, "IG_") && foundDll)
+        {
+            printf("found xinput, skipping\n");
+            continue;
+        }
+        if (cur_dev->usage != HID_USAGE_GENERIC_JOYSTICK && cur_dev->usage != HID_USAGE_GENERIC_GAMEPAD)
+        {
+            printf("not a game controller, skipping\n");
+            continue;
+        }
+        print_device(cur_dev);
+        print_hid_report_descriptor_from_path(cur_dev->path);
+    }
+}
+
 static void dinput_start(void)
 {
     HRESULT hr;
@@ -1099,8 +1203,8 @@ static void dinput_start(void)
 
     setbuf(stdout, NULL);
 #endif
-    if (!(KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine") || KeyExists(HKEY_CURRENT_USER, L"Software\\Wine")))
-    {
+    // if (!(KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine") || KeyExists(HKEY_CURRENT_USER, L"Software\\Wine")))
+    // {
         // Get a handle to the DLL module.
         bool hasEx = true;
         hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_4.dll");
@@ -1126,6 +1230,7 @@ static void dinput_start(void)
 
         if (hinstLib != NULL)
         {
+            foundDll = true;
             TRACE("found dll\r\n");
             ProcXInputGetState = (_XInputGetState)GetProcAddress(hinstLib, "XInputGetState");
             ProcXInputGetCapabilitiesEx = (_XInputGetCapabilitiesEx)GetProcAddress(hinstLib, (LPCSTR)108);
@@ -1138,7 +1243,7 @@ static void dinput_start(void)
                 for (int i = 0; i < 4; i++)
                 {
                     XINPUT_CAPABILITIES_EX caps2;
-                    if ((ProcXInputGetCapabilitiesEx)(1, i, 0, &caps2) != ERROR_DEVICE_NOT_CONNECTED && caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GAMEPAD)
+                    if ((ProcXInputGetCapabilitiesEx)(1, i, 0, &caps2) != ERROR_DEVICE_NOT_CONNECTED)
                     {
                         TRACE("xinput vid: %04x, pid: %04x!\n", caps2.VendorId, caps2.ProductId);
                         if (caps2.VendorId == 0x1BAD && caps2.ProductId == 0x0719)
@@ -1153,9 +1258,15 @@ static void dinput_start(void)
                             TRACE("Found wiitarthing, not proxying!\n");
                             continue;
                         }
-                        TRACE("found xinput gamepad, proxying\r\n");
+                        TRACE("found xinput device, proxying\r\n");
                         controllers[dinput.mapped].xinput_index = i;
                         controllers[dinput.mapped].connected = TRUE;
+                        controllers[dinput.mapped].caps.subtype = caps2.Capabilities.SubType;
+                        if (caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GUITAR)
+                        {
+                            TRACE("found RB guitar, proxying as GH guitar\r\n");
+                            controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+                        }
                         dinput.mapped++;
                     }
                 }
@@ -1179,26 +1290,32 @@ static void dinput_start(void)
         else
         {
 
-            TRACE("unable to find xinput1_3\r\n");
+            TRACE("unable to find xinput dll\r\n");
+            foundDll = false;
         }
-    }
-    hr = DirectInput8Create(GetModuleHandleA(NULL), 0x0800, &IID_IDirectInput8A,
-                            (void **)&dinput.iface, NULL);
-    if (FAILED(hr))
-    {
-        ERR("Failed to create dinput8 interface, no xinput controller support (0x%x)\n", hr);
-        return;
-    }
+    // }
+    // hr = DirectInput8Create(GetModuleHandleA(NULL), 0x0800, &IID_IDirectInput8A,
+    //                         (void **)&dinput.iface, NULL);
+    // if (FAILED(hr))
+    // {
+    //     ERR("Failed to create dinput8 interface, no xinput controller support (0x%x)\n", hr);
+    //     return;
+    // }
 
-    hr = IDirectInput8_EnumDevices(dinput.iface, DI8DEVCLASS_GAMECTRL,
-                                   dinput_enum_callback, NULL, DIEDFL_ATTACHEDONLY);
-    if (FAILED(hr))
-    {
-        ERR("Failed to enumerate dinput8 devices, no xinput controller support (0x%x)\n", hr);
-        return;
-    }
+    // hr = IDirectInput8_EnumDevices(dinput.iface, DI8DEVCLASS_GAMECTRL,
+    //                                dinput_enum_callback, NULL, DIEDFL_ATTACHEDONLY);
+    // if (FAILED(hr))
+    // {
+    //     ERR("Failed to enumerate dinput8 devices, no xinput controller support (0x%x)\n", hr);
+    //     return;
+    // }
 
-    dinput.enabled = TRUE;
+    // dinput.enabled = TRUE;
+    struct hid_device_info *devs;
+    hid_init();
+    devs = hid_enumerate(0x0, 0x0);
+    print_devices_with_descriptor(devs);
+    hid_free_enumeration(devs);
 }
 
 static void dinput_update(int index)
@@ -1399,6 +1516,7 @@ DWORD dumb_XInputGetCapabilities(DWORD index, DWORD flags,
     if (controllers[index].xinput_index != -1)
     {
         int ret = (ProcXInputGetCapabilities)(controllers[index].xinput_index, flags, capabilities);
+        capabilities->SubType = controllers[index].caps.subtype;
         if (ret == ERROR_DEVICE_NOT_CONNECTED)
         {
             controllers[index].connected = false;
