@@ -1063,18 +1063,6 @@ static void dinput_start(void)
                     if ((ProcXInputGetCapabilitiesEx)(1, i, 0, &caps2) != ERROR_DEVICE_NOT_CONNECTED)
                     {
                         TRACE("xinput vid: %04x, pid: %04x!\n", caps2.VendorId, caps2.ProductId);
-                        if (caps2.VendorId == 0x1BAD && caps2.ProductId == 0x0719)
-                        {
-                            // process clipper / rb4instrumentmapper / wiitarthing via dinput
-                            TRACE("Found clipper / rb4instrumentmapper not proxying!\n");
-                            continue;
-                        }
-                        if (caps2.VendorId == 0x1430 && caps2.ProductId == 0x4734)
-                        {
-                            // process wiitarthing via dinput
-                            TRACE("Found wiitarthing, not proxying!\n");
-                            continue;
-                        }
                         TRACE("found xinput device, proxying\r\n");
                         controllers[dinput.mapped].xinput_index = i;
                         controllers[dinput.mapped].connected = TRUE;
@@ -1082,6 +1070,16 @@ static void dinput_start(void)
                         if (caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GUITAR)
                         {
                             TRACE("found RB guitar, proxying as GH guitar\r\n");
+                            controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+                        }
+                        if (caps2.VendorId == 0x1BAD && caps2.ProductId == 0x0719)
+                        {
+                            TRACE("Found clipper / rb4instrumentmapper, proxying as GH guitar!\n");
+                            controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+                        }
+                        if (caps2.VendorId == 0x1430 && caps2.ProductId == 0x4734)
+                        {
+                            TRACE("Found wiitarthing, proxying as GH guitar!\n");
                             controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
                         }
                         dinput.mapped++;
