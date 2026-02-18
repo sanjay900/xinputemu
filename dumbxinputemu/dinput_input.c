@@ -301,15 +301,6 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
         caps->santroller = true;
     }
-    else if (caps->windows && dinput_caps.dwAxes == 0x05 && IsXInputDevice(guidProduct))
-    {
-
-        if (guidProduct->Data1 != MAKELONG(0x1BAD, 0x0719) && guidProduct->Data1 != MAKELONG(0x1430, 0x4734))
-        {
-            TRACE("Gamepad found, ignoring dinput!\n");
-            return false;
-        }
-    }
     // if (guidProduct->Data1 == MAKELONG(0x045e, 0x028e))
     // {
     //     TRACE("Setting subtype to guitar!\n");
@@ -317,13 +308,6 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     //     caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
     //     caps->crkd = true;
     // }
-    if (guidProduct->Data1 == MAKELONG(0x1BAD, 0x0719))
-    {
-        TRACE("Setting subtype to guitar!\n");
-        TRACE("clipper / rb4instrumentmapper detected!\n");
-        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-    }
-
     if (guidProduct->Data1 == MAKELONG(0x2563, 0x0575))
     {
         TRACE("PS2 usb adapter detected!\n");
@@ -342,16 +326,13 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     TRACE("axes: %08x\n", dinput_caps.dwAxes);
     TRACE("buttons: %08x\n", dinput_caps.dwButtons);
     // only force wireless adapters to act as guitars on
-    if (!caps->windows)
+    for (i = 0; i < sizeof(wireless_products) / sizeof(wireless_products[0]); i++)
     {
-        for (i = 0; i < sizeof(wireless_products) / sizeof(wireless_products[0]); i++)
+        if (guidProduct->Data1 == wireless_products[i])
         {
-            if (guidProduct->Data1 == wireless_products[i])
-            {
-                caps->wireless = TRUE;
-                caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-                break;
-            }
+            caps->wireless = TRUE;
+            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            break;
         }
     }
 
@@ -847,56 +828,6 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
         gamepad->sThumbLX = gamepad->sThumbLY = gamepad->sThumbRY = 0;
         gamepad->sThumbRX = (js->lZ * 2) - 32768;
         gamepad->bLeftTrigger = 0;
-    }
-    else if (caps->rb360 && caps->windows && caps->axes == 0x03)
-    {
-        LONG whammy = js->rglSlider[0];
-        if (whammy > INT16_MAX)
-        {
-            whammy = INT16_MAX;
-        }
-        if (whammy < INT16_MIN)
-        {
-            whammy = INT16_MIN;
-        }
-        if (whammy)
-        {
-            caps->seenwhammy = true;
-        }
-        if (!caps->seenwhammy)
-        {
-            whammy = INT16_MIN;
-        }
-        /* Axes */
-        gamepad->sThumbLX = js->lX;
-        gamepad->sThumbLY = -js->lY;
-        gamepad->sThumbRX = whammy;
-        gamepad->sThumbRY = js->lRz;
-    }
-    else if (caps->gh360 && caps->windows && caps->axes == 0x02)
-    {
-        LONG whammy = js->rglSlider[0];
-        if (whammy > INT16_MAX)
-        {
-            whammy = INT16_MAX;
-        }
-        if (whammy < INT16_MIN)
-        {
-            whammy = INT16_MIN;
-        }
-        if (whammy)
-        {
-            caps->seenwhammy = true;
-        }
-        if (!caps->seenwhammy)
-        {
-            whammy = INT16_MIN;
-        }
-        /* Axes */
-        gamepad->sThumbLX = js->lX;
-        gamepad->sThumbLY = -js->lY;
-        gamepad->sThumbRX = whammy;
-        gamepad->sThumbRY = js->lRz;
     }
     else
     {
