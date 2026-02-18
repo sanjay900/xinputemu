@@ -9,7 +9,7 @@
 #include <stdio.h>
 
 #define DIRECTINPUT_VERSION 0x0800
-#define DEBUG
+// #define DEBUG
 #include "dinput.h"
 
 #ifndef TRACE
@@ -273,19 +273,10 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
     caps->seenwhammy = false;
     caps->wiighlinux = false;
 
-    if (dinput_caps.dwAxes == 0x02 && dinput_caps.dwButtons == 0x0a && caps->windows && IsXInputDevice(guidProduct))
+    if (caps->windows && IsXInputDevice(guidProduct))
     {
-        TRACE("Setting subtype to guitar!\n");
-        TRACE("Assuming xinput controller with 2 axes and 10 buttons is a gh guitar \n");
-        caps->gh360 = true;
-        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-    }
-    else if (dinput_caps.dwAxes == 0x03 && dinput_caps.dwButtons == 0x0a && caps->windows && IsXInputDevice(guidProduct))
-    {
-        TRACE("Setting subtype to guitar!\n");
-        TRACE("Assuming xinput controller with 3 axes and 10 buttons is a rb guitar \n");
-        caps->rb360 = true;
-        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+        TRACE("Xinput device found, skipping\r\n");
+        return false;
     }
     else if (guidProduct->Data1 == MAKELONG(0x057e, 0x0306))
     {
@@ -1138,7 +1129,7 @@ static void dinput_start(void)
                 for (int i = 0; i < 4; i++)
                 {
                     XINPUT_CAPABILITIES_EX caps2;
-                    if ((ProcXInputGetCapabilitiesEx)(1, i, 0, &caps2) != ERROR_DEVICE_NOT_CONNECTED && caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GAMEPAD)
+                    if ((ProcXInputGetCapabilitiesEx)(1, i, 0, &caps2) != ERROR_DEVICE_NOT_CONNECTED)
                     {
                         TRACE("xinput vid: %04x, pid: %04x!\n", caps2.VendorId, caps2.ProductId);
                         if (caps2.VendorId == 0x1BAD && caps2.ProductId == 0x0719)
@@ -1153,9 +1144,15 @@ static void dinput_start(void)
                             TRACE("Found wiitarthing, not proxying!\n");
                             continue;
                         }
-                        TRACE("found xinput gamepad, proxying\r\n");
+                        TRACE("found xinput device, proxying\r\n");
                         controllers[dinput.mapped].xinput_index = i;
                         controllers[dinput.mapped].connected = TRUE;
+                        controllers[dinput.mapped].caps.subtype = caps2.Capabilities.SubType;
+                        if (caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GUITAR)
+                        {
+                            TRACE("found RB guitar, proxying as GH guitar\r\n");
+                            controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+                        }
                         dinput.mapped++;
                     }
                 }
@@ -1399,6 +1396,7 @@ DWORD dumb_XInputGetCapabilities(DWORD index, DWORD flags,
     if (controllers[index].xinput_index != -1)
     {
         int ret = (ProcXInputGetCapabilities)(controllers[index].xinput_index, flags, capabilities);
+        capabilities->SubType = controllers[index].caps.subtype;
         if (ret == ERROR_DEVICE_NOT_CONNECTED)
         {
             controllers[index].connected = false;
