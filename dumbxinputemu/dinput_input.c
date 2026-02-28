@@ -716,14 +716,14 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
             if (js->rgbButtons[i] & 0x80)
                 gamepad->wButtons |= raph_psx_buttons[i];
     }
-    else if (caps->ps3rb)
+    else if (caps->ps3rb && (caps->macos || caps->windows))
     {
         buttons = min(caps->buttons, sizeof(ps3_buttons) / sizeof(*ps3_buttons));
         for (i = 0; i < buttons; i++)
             if (js->rgbButtons[i] & 0x80)
                 gamepad->wButtons |= ps3_buttons[i];
     }
-    else if (caps->ps4rb || caps->ps5rb)
+    else if (caps->ps3rb || caps->ps4rb || caps->ps5rb) // hid-sony makes these all use ps4_buttons on linux 7+
     {
         buttons = min(caps->buttons, sizeof(ps4_buttons) / sizeof(*ps4_buttons));
         for (i = 0; i < buttons; i++)
