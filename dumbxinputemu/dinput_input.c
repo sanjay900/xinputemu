@@ -832,8 +832,11 @@ static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepa
     else
     {
         /* Axes */
-        gamepad->sThumbLX = js->lX;
-        gamepad->sThumbLY = -js->lY;
+        // something jank is going on with SDL here idk
+        if (caps->subtype != XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE) {
+            gamepad->sThumbLX = js->lX;
+            gamepad->sThumbLY = -js->lY;
+        }
         if (caps->axes >= 4)
         {
             gamepad->sThumbRX = js->lRx;
