@@ -101,8 +101,18 @@ winetricks-verb:
 
 64bit: build/64/xinput1_3.dll build/64/xinput1_4.dll build/64/xinput9_1_0.dll
 
-all: build/32/xinput1_1.dll build/32/xinput1_2.dll build/32/xinput1_3.dll \
+all: clean \
+	build/32/xinput1_1.dll build/32/xinput1_2.dll build/32/xinput1_3.dll \
 	build/32/xinput1_4.dll build/32/xinput9_1_0.dll \
 	build/64/xinput1_1.dll build/64/xinput1_2.dll build/64/xinput1_3.dll \
 	build/64/xinput1_4.dll build/64/xinput9_1_0.dll \
 	winetricks-verb
+
+run:
+	cp input_config_debug.ini build/32/input_config.ini
+	cd build/32; wine XinputGuitarTest.exe
+
+fetch-test:
+	wget https://github.com/spitfirex86/XinputGuitarTest/releases/download/v1.2/XinputGuitarTest.exe -O build/32/XinputGuitarTest.exe
+
+debug: clean fetch-test all run

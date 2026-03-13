@@ -35,3 +35,4 @@
 !dlls/*
 build.zip
 build/**/input_config.ini
+uwhr.log

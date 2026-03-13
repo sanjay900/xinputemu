@@ -159,6 +159,20 @@ static bool OverrideRbWithGh()
     }
     return force_gh_guitar;
 }
+
+static bool ShowConsole()
+{
+
+    CHAR Buffer[MAX_PATH];
+    GetCurrentDirectoryA(MAX_PATH, Buffer);
+    strcat(Buffer, "\\input_config.ini");
+    UINT show_console = GetPrivateProfileIntA(
+        "debug",
+        "show_console",
+        0,
+        Buffer);
+    return show_console;
+}
 static bool OverrideWireless()
 {
 
@@ -410,11 +424,16 @@ static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revis
         caps->device_type = live_guitar;
         caps->console_type = ps3;
     }
-    if (vidpid == MAKELONG(0x12BA, 0x07BB))
+    if (vidpid == MAKELONG(0x12BA, 0x074B))
     {
         caps->device_type = live_guitar;
-        caps->console_type = ps4;
-        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+        caps->console_type = ps3;
+    }
+    if (vidpid == MAKELONG(0x12BA, 0x0140))
+    {
+        caps->device_type = turntable;
+        caps->console_type = ps3;
+        caps->subtype = XINPUT_DEVSUBTYPE_TURNTABLE;
     }
     if (vidpid == MAKELONG(0x057e, 0x0306))
     {
@@ -628,6 +647,7 @@ void print_device(struct hid_device_info *cur_dev)
     controllers[dinput.mapped].device = hid_open_path(cur_dev->path);
     hid_device *device = controllers[dinput.mapped].device;
     dinput_fill_caps(&controllers[dinput.mapped].caps, MAKELONG(cur_dev->vendor_id, cur_dev->product_id), cur_dev->release_number);
+    
     if (controllers[dinput.mapped].caps.console_type == raphnet_wii || controllers[dinput.mapped].caps.console_type == raphnet_ps2)
     {
         // config interface follows gamepad interface
@@ -773,36 +793,31 @@ static void dinput_start(void)
     HINSTANCE hinstLib;
     HINSTANCE hinstLibD;
 
-#ifdef DEBUG
     CONSOLE_SCREEN_BUFFER_INFO csbi;
 
     // Create a new console window.
-    if (!AllocConsole())
-        return;
+    if (ShowConsole() && AllocConsole()) {
 
-    // Set the screen buffer to be larger than normal (this is optional).
-    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi))
-    {
-        csbi.dwSize.Y = 1000; // any useful number of lines...
-        SetConsoleScreenBufferSize(GetStdHandle(STD_OUTPUT_HANDLE), csbi.dwSize);
+        // Set the screen buffer to be larger than normal (this is optional).
+        if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi))
+        {
+            csbi.dwSize.Y = 1000; // any useful number of lines...
+            SetConsoleScreenBufferSize(GetStdHandle(STD_OUTPUT_HANDLE), csbi.dwSize);
+        }
+
+        // Redirect "stdin" to the console window.
+        freopen("CONIN$", "w", stdin);
+
+        // Redirect "stderr" to the console window.
+        freopen("CONOUT$", "w", stderr);
+
+        // Redirect "stdout" to the console window.
+        freopen("CONOUT$", "w", stdout);
+
+        // Turn off buffering for "stdout" ("stderr" is unbuffered by default).
+
+        setbuf(stdout, NULL);
     }
-
-    // Redirect "stdin" to the console window.
-    if (!freopen("CONIN$", "w", stdin))
-        return;
-
-    // Redirect "stderr" to the console window.
-    if (!freopen("CONOUT$", "w", stderr))
-        return;
-
-    // Redirect "stdout" to the console window.
-    if (!freopen("CONOUT$", "w", stdout))
-        return;
-
-    // Turn off buffering for "stdout" ("stderr" is unbuffered by default).
-
-    setbuf(stdout, NULL);
-#endif
     // Enable hidraw for direct access to controllers on linux
     if (KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine") || KeyExists(HKEY_CURRENT_USER, L"Software\\Wine"))
     {
@@ -887,7 +902,7 @@ static void dinput_start(void)
                     controllers[dinput.mapped].connected = TRUE;
                     controllers[dinput.mapped].caps.subtype = caps2.Capabilities.SubType;
                     dinput_fill_caps(&controllers[dinput.mapped].caps, MAKELONG(caps2.VendorId, caps2.ProductId), caps2.VersionNumber);
-                    if (caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GUITAR)
+                    if (caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GUITAR && override_rb)
                     {
                         TRACE("found RB guitar, proxying as GH guitar\r\n");
                         controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
@@ -1969,6 +1984,10 @@ DWORD dumb_XInputGetCapabilities(DWORD index, DWORD flags,
     {
         int ret = (ProcXInputGetCapabilities)(controllers[index].xinput_index, flags, capabilities);
         capabilities->SubType = controllers[index].caps.subtype;
+        if (controllers[index].caps.device_type == rb_drum)
+            capabilities->Flags |= XINPUT_CAPS_FFB_SUPPORTED;
+        if (controllers[index].caps.device_type == live_guitar)
+            capabilities->Flags |= XINPUT_CAPS_NO_NAVIGATION;
         if (ret == ERROR_DEVICE_NOT_CONNECTED)
         {
             controllers[index].connected = false;
