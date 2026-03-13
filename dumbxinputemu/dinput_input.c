@@ -4,14 +4,43 @@
 #include "hidsdi.h"
 #include "dumbxinputemu.h"
 #include <cguid.h>
-#include "isxinput.h"
-
+#include <time.h>
 #include <stdio.h>
-
+#include <hidapi.h>
+#include <hidapi_winapi.h>
+#include "ps3.h"
+#include "pc_reports.h"
+#include "ps4.h"
+#include "ps5.h"
+#include "raphnet_reports.h"
+typedef enum
+{
+    gamepad,
+    gh_guitar,
+    rb_guitar,
+    gh_drum,
+    rb_drum,
+    live_guitar,
+    pro_keys,
+    pro_guitar_squire,
+    pro_guitar_mustang,
+    turntable,
+    stage_kit,
+    raphnet_wii,
+    raphnet_ps2,
+} device_type_t;
+typedef enum
+{
+    xinput,
+    ps3,
+    ps4,
+    ps5,
+    santroller,
+    xbox360
+} console_type_t;
 #define DIRECTINPUT_VERSION 0x0800
-// #define DEBUG
+#define DEBUG
 #include "dinput.h"
-
 #ifndef TRACE
 // Available only in Wine
 #define TRACE(format, ...)                                    \
@@ -43,30 +72,33 @@
         fflush(stdout);                                     \
     } while (0)
 #endif
-
+#define UP 1 << 0
+#define DOWN 1 << 1
+#define LEFT 1 << 2
+#define RIGHT 1 << 3
+static const uint8_t dpad_bindings_reverse[] = {UP, UP | RIGHT, RIGHT, DOWN | RIGHT, DOWN, DOWN | LEFT, LEFT, UP | LEFT};
 struct CapsFlags
 {
-    BOOL wireless, jedi, pov, crkd, santroller, ps3rb, ps4rb, ps2gh, ps2, ps5rb, ps3gh, ps2needschecking, rb360, gh360, windows, macos, raphwii, raphpsx, seenwhammy, sdl, wiighlinux;
+    BOOL wireless, jedi, pov, windows, macos, sdl, ps2needschecking, ps3thirdparty;
     int axes, buttons, subtype;
+    device_type_t device_type;
+    console_type_t console_type;
 };
 
 static struct ControllerMap
 {
-    LPDIRECTINPUTDEVICE8A device;
+    hid_device *device;
     int xinput_index;
     BOOL connected, acquired;
     struct CapsFlags caps;
-    XINPUT_STATE_EX state_ex;
+    XINPUT_STATE state;
     XINPUT_VIBRATION vibration;
     BOOL vibration_dirty;
-
-    DIEFFECT effect_data;
-    LPDIRECTINPUTEFFECT effect_instance;
+    time_t last_poke;
 } controllers[XUSER_MAX_COUNT];
 
 static struct
 {
-    LPDIRECTINPUT8A iface;
     BOOL enabled;
     int mapped;
 } dinput;
@@ -93,19 +125,56 @@ typedef DWORD(WINAPI *_XInputGetState)(
 );
 typedef DWORD(WINAPI *_XInputGetStateEx)(
     _In_ DWORD dwUserIndex,
-    _Out_ XINPUT_STATE_EX *pState);
+    _Out_ XINPUT_STATE *pState);
 
 _XInputGetState ProcXInputGetState;
 _XInputGetStateEx ProcXInputGetStateEx;
 _XInputGetCapabilities ProcXInputGetCapabilities;
 _XInputGetCapabilitiesEx ProcXInputGetCapabilitiesEx;
 static bool initialized = FALSE;
+static bool override_rb = FALSE;
+static bool override_wireless = FALSE;
 static void dinput_start(void);
 static void dinput_update(int index);
 static bool dirExists(LPCWSTR path)
 {
     DWORD attrs = GetFileAttributesW(path);
     return (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY));
+}
+
+static bool OverrideRbWithGh()
+{
+
+    CHAR Buffer[MAX_PATH];
+    GetCurrentDirectoryA(MAX_PATH, Buffer);
+    strcat(Buffer, "\\input_config.ini");
+    UINT force_gh_guitar = GetPrivateProfileIntA(
+        "overrides",
+        "force_gh_guitar",
+        0,
+        Buffer);
+    if (force_gh_guitar)
+    {
+        printf("Overidding RB guitar subtype with GH guitar subtype");
+    }
+    return force_gh_guitar;
+}
+static bool OverrideWireless()
+{
+
+    CHAR Buffer[MAX_PATH];
+    GetCurrentDirectoryA(MAX_PATH, Buffer);
+    strcat(Buffer, "\\input_config.ini");
+    UINT override_wireless = GetPrivateProfileIntA(
+        "overrides",
+        "override_wireless",
+        0,
+        Buffer);
+    if (override_wireless)
+    {
+        printf("Overidding RB guitar subtype with GH guitar subtype");
+    }
+    return override_wireless;
 }
 
 static bool IsMacos()
@@ -133,40 +202,60 @@ static bool KeyExists(HKEY hKeyRoot, LPCWSTR subKey)
     }
 }
 
-static bool SDLEnabled()
+static bool UpdateKey(HKEY hKeyRoot, LPCWSTR subKey, LPCWSTR name, DWORD val)
 {
-    uint32_t data;
-    size_t size = sizeof(data);
     HKEY hKey;
-    LONG result = RegGetValueW(HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Services\\WineBus", L"Enable SDL", RRF_RT_DWORD, NULL, (LPDWORD)&data, (LPDWORD)&size);
+    LONG result = RegCreateKeyExW(hKeyRoot, subKey, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL);
 
     if (result == ERROR_SUCCESS)
     {
-        return data;
+        DWORD type;
+        DWORD ret;
+        DWORD sz = sizeof(ret);
+        result = RegGetValueW(hKeyRoot, subKey, name, 0, &type, (LPBYTE)&ret, &sz);
+        if (result == ERROR_FILE_NOT_FOUND || ret != 1)
+        {
+            RegSetValueExW(hKey, name, 0, REG_DWORD, (LPBYTE)&val, sizeof(val));
+            RegCloseKey(hKey);
+            return true;
+        }
+        RegCloseKey(hKey);
+        return false;
     }
     else
     {
-        // SDL enabled by default
-        return true;
+        return false;
     }
 }
 
-static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags *caps, const DIDEVICEINSTANCEA *instance)
+const char *hid_bus_name(hid_bus_type bus_type)
 {
-    const GUID *guidProduct = &instance->guidProduct;
+    static const char *const HidBusTypeName[] = {
+        "Unknown",
+        "USB",
+        "Bluetooth",
+        "I2C",
+        "SPI",
+    };
+
+    if ((int)bus_type < 0)
+        bus_type = HID_API_BUS_UNKNOWN;
+    if ((int)bus_type >= (int)(sizeof(HidBusTypeName) / sizeof(HidBusTypeName[0])))
+        bus_type = HID_API_BUS_UNKNOWN;
+
+    return HidBusTypeName[bus_type];
+}
+
+static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revision)
+{
+    int i;
     HRESULT hr;
     DIDEVCAPS dinput_caps;
     static const unsigned long wireless_products[] = {
         MAKELONG(0x045e, 0x0291) /* microsoft receiver */,
         MAKELONG(0x045e, 0x02a9) /* microsoft receiver (3rd party) */,
         MAKELONG(0x045e, 0x02a1) /* microsoft controller (xpad) */,
-        MAKELONG(0x045e, 0x0719) /* microsoft controller */,
         MAKELONG(0x28de, 0x11ff) /* steam input virtual controller */,
-        MAKELONG(0x0738, 0x4556) /* mad catz */,
-        MAKELONG(0x0e6f, 0x0003) /* logitech */,
-        MAKELONG(0x0e6f, 0x0005) /* eclipse */,
-        MAKELONG(0x0e6f, 0x0006) /* edge */,
-        MAKELONG(0x102c, 0xff0c) /* joytech */
     };
     static const unsigned long ps4_products[] = {
         MAKELONG(0x0e6f, 0x024a) /* PS4 Riffmaster */,
@@ -203,6 +292,16 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         MAKELONG(0x12BA, 0x0100) /* Guitar Hero3 for PlayStation (R) 3 */,
         MAKELONG(0x1430, 0x474C) /* Guitar Hero for PC/MAC */,
     };
+    static const unsigned long gh_ps3_drum_products[] = {
+        MAKELONG(0x12BA, 0x0120) /* GuitarHero for Playstation (R) 3 */,
+    };
+    static const unsigned long rb_ps3_drum_products[] = {
+        MAKELONG(0x12BA, 0x0210) /* Harmonix Drum Kit for PlayStation(R)3 */,
+        MAKELONG(0x12BA, 0x0218) /* Harmonix Drum Kit for PlayStation(R)3 */,
+        MAKELONG(0x1BAD, 0x0005) /* Harmonix Drum Controller for Nintendo Wii */,
+        MAKELONG(0x1BAD, 0x3110) /* Harmonix Drum Controller for Nintendo Wii */,
+        MAKELONG(0x1BAD, 0x3138) /* Harmonix Drum Controller for Nintendo Wii */,
+    };
     static const unsigned long gh_xinput_products[] = {
         MAKELONG(0x1430, 0x4734) /* World Tour Kiosk */,
         MAKELONG(0x3651, 0x1000) /* CRKD SG Legacy Mode */,
@@ -216,229 +315,410 @@ static BOOL dinput_is_good(const LPDIRECTINPUTDEVICE8A device, struct CapsFlags 
         MAKELONG(0x1BAD, 0x0002) /* RB Stratocaster */,
         MAKELONG(0x0738, 0x9806) /* RB Precision Bass */
     };
-    caps->windows = !(KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine") || KeyExists(HKEY_CURRENT_USER, L"Software\\Wine"));
-    caps->macos = IsMacos();
-    if (caps->windows)
-    {
-        TRACE("Running on windows\r\n");
-    }
-    else
-    {
-        TRACE("Running on wine\r\n");
-        if (caps->macos)
-        {
-            TRACE("Running on macos\r\n");
-            // macos doesn't use sdl style mappings for santroller things
-            caps->sdl = false;
-        }
-        else
-        {
-            TRACE("Running on linux\r\n");
-            caps->sdl = SDLEnabled();
-            if (caps->sdl)
-            {
-                TRACE("SDL Enabled, you may have problems with tilt\r\n");
-            }
-            else
-            {
-
-                TRACE("SDL Disabled\r\n");
-            }
-        }
-    }
-
-    int i;
-
-    dinput_caps.dwSize = sizeof(dinput_caps);
-    hr = IDirectInputDevice_GetCapabilities(device, &dinput_caps);
-    if (FAILED(hr))
-        return FALSE;
-
-    if (dinput_caps.dwAxes < 2 || dinput_caps.dwButtons < 8)
-        return FALSE;
-    caps->axes = dinput_caps.dwAxes;
-    caps->buttons = dinput_caps.dwButtons;
-    caps->wireless = FALSE;
-    caps->jedi = !!(dinput_caps.dwFlags & DIDC_FORCEFEEDBACK);
-    caps->pov = !!dinput_caps.dwPOVs;
-    caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
-    caps->santroller = false;
-    caps->crkd = false;
-    caps->ps2 = false;
-    caps->ps3rb = false;
-    caps->ps4rb = false;
-    caps->ps5rb = false;
-    caps->ps3gh = false;
-    caps->rb360 = false;
-    caps->gh360 = false;
-    caps->ps2gh = false;
-    caps->ps2 = false;
     caps->ps2needschecking = false;
-    caps->seenwhammy = false;
-    caps->wiighlinux = false;
+    caps->ps3thirdparty = true;
+    caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
 
-    if (caps->windows && IsXInputDevice(guidProduct))
+    if (vidpid == MAKELONG(0x1209, 0x2882))
     {
-        TRACE("Xinput device found, skipping\r\n");
-        return false;
-    }
-    else if (guidProduct->Data1 == MAKELONG(0x057e, 0x0306))
-    {
-        TRACE("Wii controller detected!\n");
-        if (strcmp(instance->tszProductName, "Nintendo Wii Remote Guitar") == 0)
-        {
-            printf("found wii guitar\r\n");
-            caps->wiighlinux = true;
-            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-        }
-        // only care about the guitar peripheral
-        if (strcmp(instance->tszProductName, "Nintendo Wii Remote") == 0)
-        {
-            printf("found wii remote, ignoring\r\n");
-            return FALSE;
-        }
-    }
-    else if (guidProduct->Data1 == MAKELONG(0x1209, 0x2882))
-    {
-        TRACE("Setting subtype to guitar!\n");
-        TRACE("Santroller hid guitar detected!\n");
+        uint8_t type = revision >> 8;
         caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-        caps->santroller = true;
+        caps->device_type = gh_guitar;
+        caps->console_type = santroller;
+        switch (revision >> 8)
+        {
+        case STAGE_KIT:
+            caps->subtype = XINPUT_DEVSUBTYPE_STAGE_KIT;
+            caps->device_type = stage_kit;
+            TRACE("Santroller hid stage kit detected!\n");
+            break;
+        case GAMEPAD:
+            caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
+            caps->device_type = gamepad;
+            TRACE("Santroller hid gamepad detected!\n");
+            break;
+        case GUITAR_HERO_GUITAR:
+            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            caps->device_type = gh_guitar;
+            TRACE("Santroller hid gh guitar detected!\n");
+            break;
+        case ROCK_BAND_GUITAR:
+            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR;
+            caps->device_type = rb_guitar;
+            TRACE("Santroller hid rb guitar detected!\n");
+            if (override_rb)
+            {
+                printf("Overidding RB guitar subtype with GH guitar subtype");
+                caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            }
+            break;
+        case GUITAR_HERO_DRUMS:
+            caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
+            caps->device_type = gh_drum;
+            TRACE("Santroller hid gh drum detected!\n");
+            break;
+        case ROCK_BAND_DRUMS:
+            caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
+            caps->device_type = rb_drum;
+            TRACE("Santroller hid rb drum detected!\n");
+            break;
+        case LIVE_GUITAR:
+            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            caps->device_type = live_guitar;
+            TRACE("Santroller hid live guitar detected!\n");
+            break;
+        case DJ_HERO_TURNTABLE:
+            caps->subtype = DJ_HERO_TURNTABLE;
+            caps->device_type = turntable;
+            TRACE("Santroller hid turntable detected!\n");
+            break;
+        case ROCK_BAND_PRO_KEYS:
+            caps->subtype = XINPUT_DEVSUBTYPE_PRO_KEYS;
+            caps->device_type = pro_keys;
+            TRACE("Santroller hid pro keys detected!\n");
+            break;
+        case ROCK_BAND_PRO_GUITAR_MUSTANG:
+            caps->subtype = XINPUT_DEVSUBTYPE_PRO_GUITAR;
+            caps->device_type = pro_guitar_mustang;
+            TRACE("Santroller hid pro guitar mustang detected!\n");
+            break;
+        case ROCK_BAND_PRO_GUITAR_SQUIRE:
+            caps->subtype = XINPUT_DEVSUBTYPE_PRO_GUITAR;
+            caps->device_type = pro_guitar_squire;
+            TRACE("Santroller hid pro guitar squire detected!\n");
+            break;
+        }
     }
-    // if (guidProduct->Data1 == MAKELONG(0x045e, 0x028e))
+    // if (vidpid == MAKELONG(0x045e, 0x028e))
     // {
     //     TRACE("Setting subtype to guitar!\n");
     //     TRACE("CRKD guitar detected!\n");
     //     caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
     //     caps->crkd = true;
     // }
-    if (guidProduct->Data1 == MAKELONG(0x2563, 0x0575))
+    if (vidpid == MAKELONG(0x2563, 0x0575))
     {
         TRACE("PS2 usb adapter detected!\n");
-        caps->ps2 = true;
         caps->ps2needschecking = true;
+        caps->ps3thirdparty = false;
+        caps->device_type = gamepad;
+        // adapter emulates ps3 controller
+        caps->console_type = ps3;
+    }
+    if (vidpid == MAKELONG(0x12BA, 0x074B))
+    {
+        caps->device_type = live_guitar;
+        caps->console_type = ps3;
+    }
+    if (vidpid == MAKELONG(0x12BA, 0x07BB))
+    {
+        caps->device_type = live_guitar;
+        caps->console_type = ps4;
+        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+    }
+    if (vidpid == MAKELONG(0x057e, 0x0306))
+    {
+        TRACE("Wii controller detected!\n");
+        // if (strcmp(instance->tszProductName, "Nintendo Wii Remote Guitar") == 0)
+        // {
+        //     printf("found wii guitar\r\n");
+        //     caps->wiighlinux = true;
+        //     caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+        // }
+        // // only care about the guitar peripheral
+        // if (strcmp(instance->tszProductName, "Nintendo Wii Remote") == 0)
+        // {
+        //     printf("found wii remote, ignoring\r\n");
+        //     return FALSE;
+        // }
     }
 
-    if (guidProduct->Data1 == MAKELONG(0x1BAD, 0x0130))
-    {
-        TRACE("Setting subtype to drums!\n");
-        TRACE("XInput drums detected!\n");
-        caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
-    }
-    TRACE("vidpid: %08x\n", guidProduct->Data1);
-    TRACE("vidpid: %08x\n", guidProduct->Data1);
+    TRACE("vidpid: %08x\n", vidpid);
+    TRACE("vidpid: %08x\n", vidpid);
     TRACE("axes: %08x\n", dinput_caps.dwAxes);
     TRACE("buttons: %08x\n", dinput_caps.dwButtons);
-    // only force wireless adapters to act as guitars on
+    // only force wireless adapters to act as guitars on linux
     for (i = 0; i < sizeof(wireless_products) / sizeof(wireless_products[0]); i++)
     {
-        if (guidProduct->Data1 == wireless_products[i])
+        if (vidpid == wireless_products[i])
         {
             caps->wireless = TRUE;
-            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            caps->console_type = xbox360;
+            if (override_wireless)
+            {
+                caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+                caps->device_type = gh_guitar;
+            }
             break;
         }
     }
 
     for (i = 0; i < sizeof(ps4_products) / sizeof(ps4_products[0]); i++)
     {
-        if (guidProduct->Data1 == ps4_products[i])
+        if (vidpid == ps4_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
             TRACE("PS4 guitar detected!\n");
-            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-            caps->ps4rb = true;
+            if (override_rb)
+            {
+                caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            }
+            else
+            {
+                caps->subtype = XINPUT_DEVSUBTYPE_GUITAR;
+            }
+            caps->device_type = rb_guitar;
+            caps->console_type = ps4;
             break;
         }
     }
 
     for (i = 0; i < sizeof(ps5_products) / sizeof(ps5_products[0]); i++)
     {
-        if (guidProduct->Data1 == ps5_products[i])
+        if (vidpid == ps5_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
             TRACE("PS5 guitar detected!\n");
-            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-            caps->ps5rb = true;
+            if (override_rb)
+            {
+                caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            }
+            else
+            {
+                caps->subtype = XINPUT_DEVSUBTYPE_GUITAR;
+            }
+            caps->device_type = rb_guitar;
+            caps->console_type = ps5;
             break;
         }
     }
 
     for (i = 0; i < sizeof(raphnet_wii_products) / sizeof(raphnet_wii_products[0]); i++)
     {
-        if (guidProduct->Data1 == raphnet_wii_products[i])
+        if (vidpid == raphnet_wii_products[i])
         {
-            TRACE("Setting subtype to guitar!\n");
             TRACE("Raphnet wusbmote detected!\n");
-            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-            caps->raphwii = true;
+            caps->device_type = gamepad;
+            caps->console_type = raphnet_wii;
+            caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
             break;
         }
     }
 
     for (i = 0; i < sizeof(raphnet_ps2_products) / sizeof(raphnet_ps2_products[0]); i++)
     {
-        if (guidProduct->Data1 == raphnet_ps2_products[i])
+        if (vidpid == raphnet_ps2_products[i])
         {
-            TRACE("Setting subtype to guitar!\n");
             TRACE("Raphnet ps2 adapter detected!\n");
-            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-            caps->raphpsx = true;
+            caps->device_type = gamepad;
+            caps->console_type = raphnet_ps2;
+            caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
             break;
         }
     }
 
     for (i = 0; i < sizeof(rb_ps3_products) / sizeof(rb_ps3_products[0]); i++)
     {
-        if (guidProduct->Data1 == rb_ps3_products[i])
+        if (vidpid == rb_ps3_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
             TRACE("RB PS3 guitar detected!\n");
-            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-            caps->ps3rb = true;
+            if (override_rb)
+            {
+                caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            }
+            else
+            {
+                caps->subtype = XINPUT_DEVSUBTYPE_GUITAR;
+            }
+            caps->device_type = rb_guitar;
+            caps->console_type = ps3;
             break;
         }
     }
 
     for (i = 0; i < sizeof(gh_ps3_products) / sizeof(gh_ps3_products[0]); i++)
     {
-        if (guidProduct->Data1 == gh_ps3_products[i])
+        if (vidpid == gh_ps3_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
             TRACE("GH PS3 guitar detected!\n");
             caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-            caps->ps3gh = true;
+            caps->device_type = gh_guitar;
+            caps->console_type = ps3;
+            break;
+        }
+    }
+
+    for (i = 0; i < sizeof(rb_ps3_drum_products) / sizeof(rb_ps3_drum_products[0]); i++)
+    {
+        if (vidpid == rb_ps3_drum_products[i])
+        {
+            TRACE("Setting subtype to guitar!\n");
+            TRACE("RB PS3 drum detected!\n");
+            caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
+            caps->device_type = rb_drum;
+            caps->console_type = ps3;
+            break;
+        }
+    }
+
+    for (i = 0; i < sizeof(gh_ps3_drum_products) / sizeof(gh_ps3_drum_products[0]); i++)
+    {
+        if (vidpid == gh_ps3_drum_products[i])
+        {
+            TRACE("Setting subtype to guitar!\n");
+            TRACE("GH PS3 drum detected!\n");
+            caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
+            caps->device_type = gh_drum;
+            caps->console_type = ps3;
             break;
         }
     }
 
     for (i = 0; i < sizeof(gh_xinput_products) / sizeof(gh_xinput_products[0]); i++)
     {
-        if (guidProduct->Data1 == gh_xinput_products[i])
+        if (vidpid == gh_xinput_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
             TRACE("XInput GH guitar detected!\n");
             caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-            // on windows, 360 guitars don't actually show every axis, so we need to skip axis count checks
-            caps->gh360 = true;
+            caps->device_type = gh_guitar;
+            caps->console_type = xbox360;
             break;
         }
     }
 
     for (i = 0; i < sizeof(rb_xinput_products) / sizeof(rb_xinput_products[0]); i++)
     {
-        if (guidProduct->Data1 == rb_xinput_products[i])
+        if (vidpid == rb_xinput_products[i])
         {
             TRACE("Setting subtype to guitar!\n");
             TRACE("XInput RB guitar detected!\n");
-            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-            // on windows, 360 guitars don't actually show every axis, so we need to skip axis count checks
-            caps->rb360 = true;
+            if (override_rb)
+            {
+                caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            }
+            else
+            {
+                caps->subtype = XINPUT_DEVSUBTYPE_GUITAR;
+            }
+            caps->device_type = rb_guitar;
+            caps->console_type = xbox360;
             break;
         }
     }
+}
 
-    return TRUE;
+void print_device(struct hid_device_info *cur_dev)
+{
+    printf("Device Found\n  type: %04hx %04hx\n  path: %s\n  serial_number: %ls", cur_dev->vendor_id, cur_dev->product_id, cur_dev->path, cur_dev->serial_number);
+    printf("\n");
+    printf("  Manufacturer: %ls\n", cur_dev->manufacturer_string);
+    printf("  Product:      %ls\n", cur_dev->product_string);
+    printf("  Release:      %hx\n", cur_dev->release_number);
+    printf("  Interface:    %d\n", cur_dev->interface_number);
+    printf("  Usage (page): 0x%hx (0x%hx)\n", cur_dev->usage, cur_dev->usage_page);
+    printf("  Bus type: %u (%s)\n", (unsigned)cur_dev->bus_type, hid_bus_name(cur_dev->bus_type));
+    printf("\n");
+    if (dinput.mapped == sizeof(controllers) / sizeof(*controllers))
+        return;
+    controllers[dinput.mapped].xinput_index = -1;
+    controllers[dinput.mapped].connected = TRUE;
+    controllers[dinput.mapped].device = hid_open_path(cur_dev->path);
+    hid_device *device = controllers[dinput.mapped].device;
+    dinput_fill_caps(&controllers[dinput.mapped].caps, MAKELONG(cur_dev->vendor_id, cur_dev->product_id), cur_dev->release_number);
+    if (controllers[dinput.mapped].caps.console_type == raphnet_wii || controllers[dinput.mapped].caps.console_type == raphnet_ps2)
+    {
+        // config interface follows gamepad interface
+        hid_device *config = hid_open_path(cur_dev->next->path);
+        uint8_t data[65] = {0x00, 0x00, 0x00, 0x00};
+        uint8_t data2[65] = {0x00, 0x06, 0x00, 0x00};
+        for (int i = 0; i < 10; i++)
+        {
+            hid_send_feature_report(config, data2, sizeof(data2));
+            hid_get_feature_report(config, data, sizeof(data));
+            if (data[1])
+            {
+                printf("raphnet type: %d\r\n", data[3]);
+
+                switch (data[3])
+                {
+                case RNT_TYPE_PSX_DIGITAL:
+                case RNT_TYPE_PSX_ANALOG:
+                case RNT_TYPE_PSX_NEGCON:
+                case RNT_TYPE_PSX_MOUSE:
+                case RNT_TYPE_CLASSIC:
+                case RNT_TYPE_UDRAW_TABLET:
+                case RNT_TYPE_NUNCHUK:
+                case RNT_TYPE_CLASSIC_PRO:
+                    controllers[dinput.mapped].caps.device_type = gamepad;
+                    controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
+                    printf("Raphnet controller type: gamepad\r\n");
+                    // TODO: check if its a ps2 guitar
+                    break;
+                case RNT_TYPE_WII_GUITAR:
+                    controllers[dinput.mapped].caps.device_type = gh_guitar;
+                    controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+                    printf("Raphnet controller type: guitar\r\n");
+                    break;
+                case RNT_TYPE_WII_DRUM:
+                    controllers[dinput.mapped].caps.device_type = gh_drum;
+                    controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
+                    printf("Raphnet controller type: drum\r\n");
+                    break;
+                }
+                break;
+            }
+            Sleep(100);
+        }
+        hid_close(config);
+    }
+    dinput.mapped++;
+}
+
+void print_devices(struct hid_device_info *cur_dev)
+{
+    for (; cur_dev; cur_dev = cur_dev->next)
+    {
+        print_device(cur_dev);
+    }
+}
+
+void print_devices_with_descriptor(struct hid_device_info *cur_dev)
+{
+    for (; cur_dev; cur_dev = cur_dev->next)
+    {
+        if (strstr(cur_dev->path, "IG_"))
+        {
+            printf("found xinput, skipping\n");
+            continue;
+        }
+        if (cur_dev->usage != HID_USAGE_GENERIC_JOYSTICK && cur_dev->usage != HID_USAGE_GENERIC_GAMEPAD)
+        {
+            continue;
+        }
+        print_device(cur_dev);
+    }
+}
+
+static bool SDLEnabled()
+{
+    uint32_t data;
+    size_t size = sizeof(data);
+    HKEY hKey;
+    LONG result = RegGetValueW(HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Services\\WineBus", L"Enable SDL", RRF_RT_DWORD, NULL, (LPDWORD)&data, (LPDWORD)&size);
+
+    if (result == ERROR_SUCCESS)
+    {
+        return data;
+    }
+    else
+    {
+        // SDL enabled by default
+        return true;
+    }
+    return false;
 }
 
 static BOOL dinput_set_range(const LPDIRECTINPUTDEVICE8A device)
@@ -476,520 +756,14 @@ long map(long x, long in_min, long in_max, long out_min, long out_max)
     return out;
 }
 
-static void dinput_joystate_to_xinput(DIJOYSTATE2 *js, XINPUT_GAMEPAD_EX *gamepad, struct CapsFlags *caps)
+static int string_ends_with(const char *str, const char *suffix)
 {
-    static const int wii_linux_gh_buttons[] = {
-        XINPUT_GAMEPAD_BACK,
-        XINPUT_GAMEPAD_START,
-        XINPUT_GAMEPAD_DPAD_UP,
-        XINPUT_GAMEPAD_DPAD_DOWN,
-        XINPUT_GAMEPAD_A,
-        XINPUT_GAMEPAD_B,
-        XINPUT_GAMEPAD_Y,
-        XINPUT_GAMEPAD_X,
-        XINPUT_GAMEPAD_LEFT_SHOULDER};
-    static const int xbox_buttons[] = {
-        XINPUT_GAMEPAD_A,
-        XINPUT_GAMEPAD_B,
-        XINPUT_GAMEPAD_X,
-        XINPUT_GAMEPAD_Y,
-        XINPUT_GAMEPAD_LEFT_SHOULDER,
-        XINPUT_GAMEPAD_RIGHT_SHOULDER,
-        XINPUT_GAMEPAD_BACK,
-        XINPUT_GAMEPAD_START,
-        XINPUT_GAMEPAD_GUIDE,
-        XINPUT_GAMEPAD_LEFT_THUMB,
-        XINPUT_GAMEPAD_RIGHT_THUMB};
+    int str_len = strlen(str);
+    int suffix_len = strlen(suffix);
 
-    static const int santroller_buttons[] = {
-        XINPUT_GAMEPAD_A,
-        XINPUT_GAMEPAD_B,
-        0x00,
-        XINPUT_GAMEPAD_X,
-        XINPUT_GAMEPAD_Y,
-        0x00,
-        XINPUT_GAMEPAD_LEFT_SHOULDER,
-        0x00,
-        0x00,
-        0x00,
-        XINPUT_GAMEPAD_BACK,
-        XINPUT_GAMEPAD_START,
-        XINPUT_GAMEPAD_GUIDE,
-        XINPUT_GAMEPAD_LEFT_THUMB,
-        XINPUT_GAMEPAD_RIGHT_THUMB};
-
-    static const int ps2_gh_buttons[] = {
-        XINPUT_GAMEPAD_Y,
-        XINPUT_GAMEPAD_B,
-        XINPUT_GAMEPAD_X,
-        XINPUT_GAMEPAD_LEFT_SHOULDER,
-        0x00,
-        0x00, // tilt
-        0x00, // solo
-        XINPUT_GAMEPAD_A,
-        XINPUT_GAMEPAD_BACK,
-        XINPUT_GAMEPAD_START,
-        0x00,
-        0x00,
-        0x00
-
-    };
-
-    static const int ps2_buttons[] = {
-        XINPUT_GAMEPAD_Y,
-        XINPUT_GAMEPAD_B,
-        XINPUT_GAMEPAD_A,
-        XINPUT_GAMEPAD_X,
-        XINPUT_GAMEPAD_LEFT_SHOULDER,
-        XINPUT_GAMEPAD_RIGHT_SHOULDER,
-        0x00, // l2
-        0x00, // r2
-        XINPUT_GAMEPAD_BACK,
-        XINPUT_GAMEPAD_START,
-        0x00,
-        0x00,
-        0x00
-
-    };
-
-    static const int ps3_buttons[] = {
-        XINPUT_GAMEPAD_X,
-        XINPUT_GAMEPAD_A,
-        XINPUT_GAMEPAD_B,
-        XINPUT_GAMEPAD_Y,
-        XINPUT_GAMEPAD_LEFT_SHOULDER,
-        0x00,                      // tilt
-        XINPUT_GAMEPAD_LEFT_THUMB, // solo
-        0x00,
-        XINPUT_GAMEPAD_BACK,
-        XINPUT_GAMEPAD_START,
-        XINPUT_GAMEPAD_RIGHT_THUMB,
-        XINPUT_GAMEPAD_GUIDE,
-        0x00
-
-    };
-    static const int raph_wii_buttons[] = {
-        XINPUT_GAMEPAD_A,
-        XINPUT_GAMEPAD_B,
-        XINPUT_GAMEPAD_Y,
-        XINPUT_GAMEPAD_X,
-        XINPUT_GAMEPAD_LEFT_SHOULDER,
-        XINPUT_GAMEPAD_DPAD_DOWN, // tilt
-        XINPUT_GAMEPAD_START,     // solo
-        XINPUT_GAMEPAD_BACK,
-        XINPUT_GAMEPAD_DPAD_UP,
-        0x00,
-        0x00,
-        0x00,
-        0x00
-
-    };
-    static const int raph_psx_buttons[] = {
-        XINPUT_GAMEPAD_LEFT_SHOULDER,
-        XINPUT_GAMEPAD_X,
-        XINPUT_GAMEPAD_B,
-        XINPUT_GAMEPAD_Y,
-        XINPUT_GAMEPAD_START,
-        XINPUT_GAMEPAD_BACK,
-        0x00,
-        0x00,
-        0x00, // TILT
-        XINPUT_GAMEPAD_A,
-        0x00,
-        0x00,
-        XINPUT_GAMEPAD_DPAD_UP,
-        XINPUT_GAMEPAD_DPAD_DOWN,
-        XINPUT_GAMEPAD_DPAD_LEFT,
-        XINPUT_GAMEPAD_DPAD_RIGHT
-
-    };
-    static const int ps4_buttons[] = {
-        XINPUT_GAMEPAD_A,
-        XINPUT_GAMEPAD_B,
-        XINPUT_GAMEPAD_Y,
-        XINPUT_GAMEPAD_X,
-        XINPUT_GAMEPAD_LEFT_SHOULDER,
-        0x00,                      // tilt
-        XINPUT_GAMEPAD_LEFT_THUMB, // solo
-        0x00,
-        XINPUT_GAMEPAD_BACK,
-        XINPUT_GAMEPAD_START,
-        XINPUT_GAMEPAD_RIGHT_THUMB,
-        XINPUT_GAMEPAD_GUIDE,
-        XINPUT_GAMEPAD_START // map p1 to start so clicking in the joystick works
-
-    };
-    static const int ps3_gh_buttons[] = {
-        XINPUT_GAMEPAD_Y,
-        XINPUT_GAMEPAD_A,
-        XINPUT_GAMEPAD_B,
-        XINPUT_GAMEPAD_X,
-        XINPUT_GAMEPAD_LEFT_SHOULDER,
-        0x00, // tilt
-        0x00, // solo
-        0x00,
-        XINPUT_GAMEPAD_BACK,
-        XINPUT_GAMEPAD_START,
-        XINPUT_GAMEPAD_RIGHT_THUMB,
-        XINPUT_GAMEPAD_GUIDE,
-        0x00
-
-    };
-    int i, buttons;
-
-    gamepad->dwPaddingReserved = 0;
-    gamepad->wButtons = 0x0000;
-    /* First the D-Pad which is recognized as a POV in dinput */
-    if (caps->pov && !caps->raphwii && !caps->raphpsx)
-    {
-        switch (js->rgdwPOV[0])
-        {
-        case 0:
-            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_UP;
-            break;
-        case 4500:
-            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_UP; /* fall through */
-        case 9000:
-            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
-            break;
-        case 13500:
-            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT; /* fall through */
-        case 18000:
-            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
-            break;
-        case 22500:
-            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_DOWN; /* fall through */
-        case 27000:
-            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
-            break;
-        case 31500:
-            gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_UP;
-        }
-    }
-    if (caps->ps2needschecking)
-    {
-        // can only check after we have seen an input
-        if (gamepad->wButtons || js->lX || js->lY || js->lZ || js->lRx || js->lRy || js->lRz)
-        {
-            caps->ps2needschecking = false;
-            TRACE("pov: %d\r\n", gamepad->wButtons & XINPUT_GAMEPAD_DPAD_LEFT);
-            if (gamepad->wButtons & XINPUT_GAMEPAD_DPAD_LEFT)
-            {
-                caps->ps2gh = true;
-                caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-                TRACE("Setting subtype to guitar!\n");
-                TRACE("PS2 guitar detected!\n");
-            }
-        }
-    }
-    /* Buttons */
-    if (caps->wiighlinux)
-    {
-        buttons = min(caps->buttons, sizeof(wii_linux_gh_buttons) / sizeof(*wii_linux_gh_buttons));
-        for (i = 0; i < buttons; i++)
-            if (js->rgbButtons[i] & 0x80)
-                gamepad->wButtons |= wii_linux_gh_buttons[i];
-    }
-    else if (caps->ps2gh)
-    {
-        // gh guitars hold dpad left so we need to mask that out
-        gamepad->wButtons &= ~XINPUT_GAMEPAD_DPAD_LEFT;
-        buttons = min(caps->buttons, sizeof(ps2_gh_buttons) / sizeof(*ps2_gh_buttons));
-        for (i = 0; i < buttons; i++)
-            if (js->rgbButtons[i] & 0x80)
-                gamepad->wButtons |= ps2_gh_buttons[i];
-    }
-    else if (caps->ps2)
-    {
-        buttons = min(caps->buttons, sizeof(ps2_buttons) / sizeof(*ps2_buttons));
-        for (i = 0; i < buttons; i++)
-            if (js->rgbButtons[i] & 0x80)
-                gamepad->wButtons |= ps2_buttons[i];
-    }
-    else if (caps->raphwii)
-    {
-        buttons = min(caps->buttons, sizeof(raph_wii_buttons) / sizeof(*raph_wii_buttons));
-        for (i = 0; i < buttons; i++)
-            if (js->rgbButtons[i] & 0x80)
-                gamepad->wButtons |= raph_wii_buttons[i];
-    }
-    else if (caps->raphpsx)
-    {
-        buttons = min(caps->buttons, sizeof(raph_psx_buttons) / sizeof(*raph_psx_buttons));
-        for (i = 0; i < buttons; i++)
-            if (js->rgbButtons[i] & 0x80)
-                gamepad->wButtons |= raph_psx_buttons[i];
-    }
-    else if (caps->ps3rb)
-    {
-        buttons = min(caps->buttons, sizeof(ps3_buttons) / sizeof(*ps3_buttons));
-        for (i = 0; i < buttons; i++)
-            if (js->rgbButtons[i] & 0x80)
-                gamepad->wButtons |= ps3_buttons[i];
-    }
-    else if (caps->ps4rb || caps->ps5rb)
-    {
-        buttons = min(caps->buttons, sizeof(ps4_buttons) / sizeof(*ps4_buttons));
-        for (i = 0; i < buttons; i++)
-            if (js->rgbButtons[i] & 0x80)
-                gamepad->wButtons |= ps4_buttons[i];
-    }
-    else if (caps->ps3gh)
-    {
-        buttons = min(caps->buttons, sizeof(ps3_gh_buttons) / sizeof(*ps3_gh_buttons));
-        for (i = 0; i < buttons; i++)
-            if (js->rgbButtons[i] & 0x80)
-                gamepad->wButtons |= ps3_gh_buttons[i];
-    }
-    else if (caps->santroller && !caps->sdl)
-    {
-        buttons = min(caps->buttons, sizeof(santroller_buttons) / sizeof(*santroller_buttons));
-        for (i = 0; i < buttons; i++)
-            if (js->rgbButtons[i] & 0x80)
-                gamepad->wButtons |= santroller_buttons[i];
-    }
-    else
-    {
-        buttons = min(caps->buttons, sizeof(xbox_buttons) / sizeof(*xbox_buttons));
-        for (i = 0; i < buttons; i++)
-            if (js->rgbButtons[i] & 0x80)
-                gamepad->wButtons |= xbox_buttons[i];
-    }
-    if (caps->ps2gh)
-    {
-        gamepad->sThumbLX = 0;
-        gamepad->sThumbLY = 0;
-        gamepad->sThumbRX = INT16_MIN;
-        gamepad->sThumbRY = 0;
-    }
-    else if (caps->santroller)
-    {
-        // Santroller guitars have whammy and slider flipped in their HID reports
-        gamepad->sThumbLX = -js->lY;
-        gamepad->sThumbLY = 0;
-        gamepad->sThumbRX = js->lX;
-        gamepad->sThumbRY = (js->lZ * 2) - 32768;
-    }
-    else if (caps->ps3rb)
-    {
-        gamepad->sThumbLX = 0;
-        gamepad->sThumbLY = 0;
-        gamepad->sThumbRX = 0;
-        gamepad->sThumbRY = 0;
-        gamepad->sThumbRX = (js->lZ);
-        if (js->rgbButtons[5] & 0x80)
-        {
-            gamepad->sThumbRY = 32767;
-        }
-        else
-        {
-            gamepad->sThumbRY = 0;
-        }
-    }
-    else if (caps->raphwii)
-    {
-
-        gamepad->sThumbLX = 0;
-        gamepad->sThumbLY = 0;
-        gamepad->sThumbRY = 0;
-        gamepad->sThumbRX = (js->lZ);
-    }
-    else if (caps->raphpsx)
-    {
-        gamepad->sThumbRX = (js->lZ);
-        if (js->rgbButtons[8] & 0x80)
-        {
-            gamepad->sThumbRY = 32767;
-        }
-        else
-        {
-            gamepad->sThumbRY = 0;
-        }
-    }
-    else if (caps->ps4rb || caps->ps5rb)
-    {
-        gamepad->sThumbLX = 0;
-        gamepad->sThumbLY = 0;
-        gamepad->sThumbRX = (js->lZ);
-        gamepad->sThumbRY = js->lRz;
-    }
-    else if (caps->ps3gh)
-    {
-        gamepad->sThumbLX = 0;
-        gamepad->sThumbLY = 0;
-        gamepad->sThumbRX = 0;
-        gamepad->sThumbRY = 0;
-        gamepad->sThumbRX = (js->lZ * 2) - 32768;
-        gamepad->sThumbRY = map(js->lRy, 8192, -8192, -32767, 32767);
-    }
-    else if (caps->crkd)
-    {
-        gamepad->sThumbLX = 0;
-        gamepad->sThumbLY = 0;
-        gamepad->sThumbRX = 0;
-        gamepad->sThumbRY = 0;
-        // CRKD guitars have whammy on the Z axis (LT)
-        gamepad->sThumbLX = gamepad->sThumbLY = gamepad->sThumbRY = 0;
-        gamepad->sThumbRX = (js->lZ * 2) - 32768;
-        gamepad->bLeftTrigger = 0;
-    }
-    else
-    {
-        /* Axes */
-        gamepad->sThumbLX = js->lX;
-        // something jank is going on with SDL here idk
-        if (caps->subtype != XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE) {
-            gamepad->sThumbLY = -js->lY;
-        }
-        if (caps->axes >= 4)
-        {
-            gamepad->sThumbRX = js->lRx;
-            gamepad->sThumbRY = -js->lRy;
-        }
-        else
-        {
-            gamepad->sThumbRX = gamepad->sThumbRY = 0;
-        }
-
-        /* Both triggers */
-        if (caps->axes >= 6)
-        {
-            gamepad->bLeftTrigger = (255 * (long)(js->lZ + 32767)) / 65535;
-            gamepad->bRightTrigger = (255 * (long)(js->lRz + 32767)) / 65535;
-        }
-        else if (caps->axes >= 5)
-        {
-            // DInput combines the triggers, so we gotta split it
-            gamepad->bLeftTrigger = gamepad->bRightTrigger = 0;
-            if (js->lZ < 0)
-            {
-                gamepad->bLeftTrigger = (255 * (long)(-js->lZ)) / 32767;
-            }
-            else
-            {
-                gamepad->bRightTrigger = (255 * (long)(js->lZ)) / 32767;
-            }
-        }
-        else
-            gamepad->bLeftTrigger = gamepad->bRightTrigger = 0;
-    }
+    return (str_len >= suffix_len) &&
+           (0 == strcmp(str + (str_len - suffix_len), suffix));
 }
-
-static void dinput_fill_effect(DIEFFECT *effect)
-{
-    static DWORD axes[2] = {DIJOFS_X, DIJOFS_Y};
-    static LONG direction[2] = {0, 0};
-
-    effect->dwSize = sizeof(effect);
-    effect->dwFlags = DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS;
-    effect->dwDuration = INFINITE;
-    effect->dwGain = 0;
-    effect->dwTriggerButton = DIEB_NOTRIGGER;
-    effect->cAxes = sizeof(axes) / sizeof(axes[0]);
-    effect->rgdwAxes = axes;
-    effect->rglDirection = direction;
-}
-
-static void dinput_send_effect(int index, int power)
-{
-    HRESULT hr;
-    DIPERIODIC periodic;
-    DIEFFECT *effect = &controllers[index].effect_data;
-    LPDIRECTINPUTEFFECT *instance = &controllers[index].effect_instance;
-
-    if (!*instance)
-        dinput_fill_effect(effect);
-
-    effect->cbTypeSpecificParams = sizeof(periodic);
-    effect->lpvTypeSpecificParams = &periodic;
-
-    periodic.dwMagnitude = power;
-    periodic.dwPeriod = DI_SECONDS; /* 1 second */
-    periodic.lOffset = 0;
-    periodic.dwPhase = 0;
-
-    if (!*instance)
-    {
-        hr = IDirectInputDevice8_CreateEffect(controllers[index].device, &GUID_Square,
-                                              effect, instance, NULL);
-        if (FAILED(hr))
-        {
-            WARN("Failed to create effect (0x%x)\n", hr);
-            return;
-        }
-        if (!*instance)
-        {
-            WARN("Effect not returned???\n");
-            return;
-        }
-
-        hr = IDirectInputEffect_SetParameters(*instance, effect, DIEP_AXES | DIEP_DIRECTION | DIEP_NODOWNLOAD);
-        if (FAILED(hr))
-        {
-            // TODO: I may just introduce memory leak
-            // IUnknown_Release(*instance);
-            *instance = NULL;
-            WARN("Failed to configure effect (0x%x)\n", hr);
-            return;
-        }
-    }
-
-    hr = IDirectInputEffect_SetParameters(*instance, effect, DIEP_TYPESPECIFICPARAMS | DIEP_START);
-    if (FAILED(hr))
-    {
-        WARN("Failed to play effect (0x%x)\n", hr);
-        return;
-    }
-}
-
-static BOOL CALLBACK dinput_enum_callback(const DIDEVICEINSTANCEA *instance, void *context)
-{
-    LPDIRECTINPUTDEVICE8A device;
-    HRESULT hr;
-
-    TRACE("Device %s\n", instance->tszProductName);
-    if (strstr(instance->tszProductName, "(js)") != NULL)
-    {
-        // Skip 'js' devices, use only evdev
-        if (getenv("XINPUT_NO_IGNORE_JS") == NULL)
-            // ... unless above env. variable is defined
-            return DIENUM_CONTINUE;
-    }
-
-    if (getenv("XINPUT_IGNORE_EVDEV") != NULL)
-    {
-        // Skip 'event' devices if asked to
-        if (strstr(instance->tszProductName, "(event)") != NULL)
-            return DIENUM_CONTINUE;
-    }
-
-    if (dinput.mapped == sizeof(controllers) / sizeof(*controllers))
-        return DIENUM_STOP;
-
-    hr = IDirectInput_CreateDevice(dinput.iface, &instance->guidInstance, &device, NULL);
-    if (FAILED(hr))
-        return DIENUM_CONTINUE;
-
-    if (!dinput_is_good(device, &controllers[dinput.mapped].caps, instance))
-    {
-        IDirectInput_Release(device);
-        return DIENUM_CONTINUE;
-    }
-
-    if (!dinput_set_range(device))
-    {
-        IDirectInput_Release(device);
-        return DIENUM_CONTINUE;
-    }
-
-    controllers[dinput.mapped].xinput_index = -1;
-    controllers[dinput.mapped].connected = TRUE;
-    controllers[dinput.mapped].device = device;
-    dinput.mapped++;
-
-    return DIENUM_CONTINUE;
-}
-
 static void dinput_start(void)
 {
     HRESULT hr;
@@ -1029,163 +803,1007 @@ static void dinput_start(void)
 
     setbuf(stdout, NULL);
 #endif
+    // Enable hidraw for direct access to controllers on linux
+    if (KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine") || KeyExists(HKEY_CURRENT_USER, L"Software\\Wine"))
+    {
+        // if any of them are updated, pop up a msgbox saying that the prefix needs to be restarted
+        static const uint16_t vendors[] = {
+            0x12ba,
+            0x1209,
+            0x1bad,
+            0x3651,
+            0x289b,
+            0x0e6f,
+            0x0738,
+            0x1430,
+            0x1122};
+        wchar_t regKey[64];
+        bool updated = false;
+        for (int i = 0; i < sizeof(vendors) / sizeof(vendors[0]); i++)
+        {
+            swprintf(regKey, sizeof(regKey), L"System\\CurrentControlSet\\Services\\WineBus\\Devices\\%04x", vendors[i]);
+            updated |= UpdateKey(HKEY_LOCAL_MACHINE, regKey, L"HidRaw", 1);
+        }
+        if (updated)
+        {
+            int msgboxID = MessageBoxW(
+                NULL,
+                (LPCWSTR)L"Device entries changed, please restart your wine prefix",
+                (LPCWSTR)L"Warning",
+                MB_ICONWARNING | MB_OK);
+        }
+    }
 
-    if (LoadLibraryW(L"wh.dll") != NULL) {
+    override_rb = OverrideRbWithGh();
+    override_wireless = OverrideWireless();
+    if (LoadLibraryW(L"wh.dll") != NULL)
+    {
         TRACE("found wh\r\n");
     }
-    if (!(KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine") || KeyExists(HKEY_CURRENT_USER, L"Software\\Wine")))
+    // Get a handle to the DLL module.
+    bool hasEx = true;
+    hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_4.dll");
+    if (hinstLib == NULL)
     {
-        // Get a handle to the DLL module.
-        bool hasEx = true;
-        hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_4.dll");
-        if (hinstLib == NULL)
-        {
-            hasEx = false;
-            hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_3.dll");
-        }
-        if (hinstLib == NULL)
-        {
-            hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_2.dll");
-        }
-        if (hinstLib == NULL)
-        {
-            hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_1.dll");
-        }
-        if (hinstLib == NULL)
-        {
-            hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput9_1_0.dll");
-        }
+        hasEx = false;
+        hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_3.dll");
+    }
+    if (hinstLib == NULL)
+    {
+        hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_2.dll");
+    }
+    if (hinstLib == NULL)
+    {
+        hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_1.dll");
+    }
+    if (hinstLib == NULL)
+    {
+        hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput9_1_0.dll");
+    }
 
-        // If the handle is valid, try to get the function address.
+    // If the handle is valid, try to get the function address.
 
-        if (hinstLib != NULL)
+    if (hinstLib != NULL)
+    {
+        TRACE("found dll\r\n");
+        ProcXInputGetState = (_XInputGetState)GetProcAddress(hinstLib, "XInputGetState");
+        ProcXInputGetStateEx = (_XInputGetStateEx)GetProcAddress(hinstLib, (LPCSTR)100);
+        ProcXInputGetCapabilitiesEx = (_XInputGetCapabilitiesEx)GetProcAddress(hinstLib, (LPCSTR)108);
+        ;
+        ProcXInputGetCapabilities = (_XInputGetCapabilities)GetProcAddress(hinstLib, "XInputGetCapabilities");
+
+        // If the function address is valid, call the function.
+
+        if (NULL != XInputGetState && NULL != XInputGetCapabilitiesEx && hasEx)
         {
-            TRACE("found dll\r\n");
-            ProcXInputGetState = (_XInputGetState)GetProcAddress(hinstLib, "XInputGetState");
-            ProcXInputGetStateEx = (_XInputGetStateEx)GetProcAddress(hinstLib, (LPCSTR)100);
-            ProcXInputGetCapabilitiesEx = (_XInputGetCapabilitiesEx)GetProcAddress(hinstLib, (LPCSTR)108);
-            ;
-            ProcXInputGetCapabilities = (_XInputGetCapabilities)GetProcAddress(hinstLib, "XInputGetCapabilities");
-
-            // If the function address is valid, call the function.
-
-            if (NULL != XInputGetState && NULL != XInputGetCapabilitiesEx && hasEx)
+            for (int i = 0; i < 4; i++)
             {
-                for (int i = 0; i < 4; i++)
+                XINPUT_CAPABILITIES_EX caps2;
+                if ((ProcXInputGetCapabilitiesEx)(1, i, 0, &caps2) != ERROR_DEVICE_NOT_CONNECTED)
                 {
-                    XINPUT_CAPABILITIES_EX caps2;
-                    if ((ProcXInputGetCapabilitiesEx)(1, i, 0, &caps2) != ERROR_DEVICE_NOT_CONNECTED)
+                    TRACE("xinput vid: %04x, pid: %04x!\n", caps2.VendorId, caps2.ProductId);
+                    TRACE("found xinput device, proxying\r\n");
+                    controllers[dinput.mapped].xinput_index = i;
+                    controllers[dinput.mapped].connected = TRUE;
+                    controllers[dinput.mapped].caps.subtype = caps2.Capabilities.SubType;
+                    dinput_fill_caps(&controllers[dinput.mapped].caps, MAKELONG(caps2.VendorId, caps2.ProductId), caps2.VersionNumber);
+                    if (caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GUITAR)
                     {
-                        TRACE("xinput vid: %04x, pid: %04x!\n", caps2.VendorId, caps2.ProductId);
-                        TRACE("found xinput device, proxying\r\n");
-                        controllers[dinput.mapped].xinput_index = i;
-                        controllers[dinput.mapped].connected = TRUE;
-                        controllers[dinput.mapped].caps.subtype = caps2.Capabilities.SubType;
-                        if (caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GUITAR)
-                        {
-                            TRACE("found RB guitar, proxying as GH guitar\r\n");
-                            controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-                        }
-                        if (caps2.VendorId == 0x1BAD && caps2.ProductId == 0x0719)
-                        {
-                            TRACE("Found clipper / rb4instrumentmapper, proxying as GH guitar!\n");
-                            controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-                        }
-                        if (caps2.VendorId == 0x1430 && caps2.ProductId == 0x4734)
-                        {
-                            TRACE("Found wiitarthing, proxying as GH guitar!\n");
-                            controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-                        }
-                        dinput.mapped++;
+                        TRACE("found RB guitar, proxying as GH guitar\r\n");
+                        controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
                     }
-                }
-            }
-            else if (NULL != XInputGetState && NULL != XInputGetCapabilities)
-            {
-                TRACE("found procs\r\n");
-                for (int i = 0; i < 4; i++)
-                {
-                    XINPUT_CAPABILITIES caps;
-                    if ((ProcXInputGetCapabilities)(i, 0, &caps) != ERROR_DEVICE_NOT_CONNECTED && caps.SubType == XINPUT_DEVSUBTYPE_GAMEPAD)
+                    if (caps2.VendorId == 0x1BAD && caps2.ProductId == 0x0719)
                     {
-                        TRACE("found xinput gamepad, proxying\r\n");
-                        controllers[dinput.mapped].xinput_index = i;
-                        controllers[dinput.mapped].connected = TRUE;
-                        dinput.mapped++;
+                        TRACE("Found clipper / rb4instrumentmapper, proxying as GH guitar!\n");
+                        controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
                     }
+                    if (caps2.VendorId == 0x1430 && caps2.ProductId == 0x4734)
+                    {
+                        TRACE("Found wiitarthing, proxying as GH guitar!\n");
+                        controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+                    }
+                    dinput.mapped++;
                 }
             }
         }
-        else
+        else if (NULL != XInputGetState && NULL != XInputGetCapabilities)
         {
-
-            TRACE("unable to find xinput1_3\r\n");
+            TRACE("found procs\r\n");
+            for (int i = 0; i < 4; i++)
+            {
+                XINPUT_CAPABILITIES caps;
+                if ((ProcXInputGetCapabilities)(i, 0, &caps) != ERROR_DEVICE_NOT_CONNECTED && caps.SubType == XINPUT_DEVSUBTYPE_GAMEPAD)
+                {
+                    TRACE("found xinput gamepad, proxying\r\n");
+                    controllers[dinput.mapped].xinput_index = i;
+                    controllers[dinput.mapped].connected = TRUE;
+                    dinput.mapped++;
+                }
+            }
         }
     }
-    hr = DirectInput8Create(GetModuleHandleA(NULL), 0xDEAD, &IID_IDirectInput8A,
-                            (void **)&dinput.iface, NULL);
-    if (FAILED(hr))
+    else
     {
-        hr = DirectInput8Create(GetModuleHandleA(NULL), 0x0800, &IID_IDirectInput8A,
-                                (void **)&dinput.iface, NULL);
-        if (FAILED(hr))
-        {
-            ERR("Failed to create dinput8 interface, no xinput controller support (0x%x)\n", hr);
-            return;
-        }
-    }
 
-    hr = IDirectInput8_EnumDevices(dinput.iface, DI8DEVCLASS_GAMECTRL,
-                                   dinput_enum_callback, NULL, DIEDFL_ATTACHEDONLY);
-    if (FAILED(hr))
-    {
-        ERR("Failed to enumerate dinput8 devices, no xinput controller support (0x%x)\n", hr);
-        return;
+        TRACE("unable to find xinput1_3\r\n");
     }
-
     dinput.enabled = TRUE;
+    struct hid_device_info *devs;
+    hid_init();
+    devs = hid_enumerate(0x0, 0x0);
+    print_devices_with_descriptor(devs);
+    hid_free_enumeration(devs);
 }
-
+static const uint8_t pickup_vals[] = {0x17, 0x4B, 0x79, 0xAB, 0xE0};
+uint8_t ps3_ghl_wakeup[] = {0x00, 0x02, 0x08, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00};
+uint8_t ps4_ghl_wakeup[] = {0x30, 0x02, 0x08, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00};
 static void dinput_update(int index)
 {
     HRESULT hr;
     DIJOYSTATE2 data;
-    XINPUT_GAMEPAD_EX gamepad;
-
-    // DPRINT("dinput_update: %d\n", index);
+    XINPUT_GAMEPAD gamepad_state;
 
     if (dinput.enabled)
     {
-        if (!controllers[index].acquired)
+        uint8_t last_pickup = gamepad_state.bLeftTrigger;
+        int16_t last_whammy = gamepad_state.sThumbRX;
+        struct CapsFlags caps = controllers[index].caps;
+        memset(&gamepad_state, 0, sizeof(XINPUT_GAMEPAD));
+        if (controllers[index].caps.device_type == live_guitar)
         {
-            IDirectInputDevice8_SetDataFormat(controllers[index].device, &c_dfDIJoystick2);
-            hr = IDirectInputDevice8_Acquire(controllers[index].device);
-            if (FAILED(hr))
+            time_t last = controllers[index].last_poke;
+            time_t ltime;
+            time(&ltime);
+            if (ltime - last > 8)
             {
-                WARN("Failed to acquire game controller (0x%x)\n", hr);
-                return;
+                controllers[index].last_poke = ltime;
+                if (caps.console_type == ps3)
+                {
+                    hid_send_output_report(controllers[index].device, ps3_ghl_wakeup, sizeof(ps3_ghl_wakeup));
+                }
+                if (caps.console_type == ps4)
+                {
+                    hid_send_output_report(controllers[index].device, ps4_ghl_wakeup, sizeof(ps4_ghl_wakeup));
+                }
             }
-            controllers[index].acquired = TRUE;
         }
-
-        IDirectInputDevice8_Poll(controllers[index].device);
-        hr = IDirectInputDevice_GetDeviceState(controllers[index].device, sizeof(data), &data);
-        if (FAILED(hr))
+        uint8_t data[64];
+        int size = hid_read_timeout(controllers[index].device, data, sizeof(data), 1);
+        if (!size)
         {
-            if (hr == DIERR_INPUTLOST)
-                controllers[index].acquired = FALSE;
-            WARN("Failed to get game controller state (0x%x)\n", hr);
             return;
         }
-        dinput_joystate_to_xinput(&data, &gamepad, &controllers[index].caps);
+        if (controllers[index].caps.console_type == ps3)
+        {
+
+            if (!controllers[index].caps.ps3thirdparty)
+            {
+                PS3Gamepad_Data_t *report = (PS3Gamepad_Data_t *)data;
+                if (controllers[index].caps.ps2needschecking)
+                {
+                    controllers[index].caps.ps2needschecking = false;
+
+                    if (report->dpadLeft)
+                    {
+                        controllers[index].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+                        controllers[index].caps.device_type = gh_guitar;
+                        TRACE("Setting subtype to guitar!\n");
+                        TRACE("PS2 guitar detected!\n");
+                    }
+                }
+                if (controllers[index].caps.device_type == gamepad)
+                {
+                    if (report->a)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                    if (report->b)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                    if (report->x)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                    if (report->y)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                    if (report->leftShoulder)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                    if (report->rightShoulder)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+                    if (report->dpadUp)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                    if (report->dpadDown)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                    if (report->dpadLeft)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                    if (report->dpadRight)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                    if (report->start)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                    if (report->back)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+                    gamepad_state.sThumbLX = (report->leftStickX << 8) - 32767;
+                    gamepad_state.sThumbLY = (report->leftStickY << 8) - 32767;
+                    gamepad_state.sThumbRX = (report->rightStickX << 8) - 32767;
+                    gamepad_state.sThumbRY = (report->rightStickY << 8) - 32767;
+                }
+            }
+            else
+            {
+                PS3Dpad_Data_t *report = (PS3Dpad_Data_t *)data;
+                uint8_t dpad = report->dpad >= 0x08 ? 0 : dpad_bindings_reverse[report->dpad];
+                bool up = dpad & UP;
+                bool left = dpad & LEFT;
+                bool down = dpad & DOWN;
+                bool right = dpad & RIGHT;
+                switch (controllers[index].caps.device_type)
+                {
+                case live_guitar:
+                {
+                    PS3GHLGuitar_Data_t *report = (PS3GHLGuitar_Data_t *)data;
+                    if (report->a)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                    if (report->b)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                    if (report->x)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                    if (report->y)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                    if (report->leftShoulder)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                    if (report->rightShoulder)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+                    if (report->leftThumbClick)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+                    if (up)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                    if (down)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                    if (left)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                    if (right)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                    if (report->start)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                    if (report->back)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+
+                    int32_t whammy = (report->whammy << 8) - 32767;
+                    int32_t strum = (report->strumBar << 8) - 32767;
+                    int32_t tilt = ((report->tilt & 0xFF) << 8) - 32767;
+                    gamepad_state.sThumbLX = 0;
+                    gamepad_state.sThumbLY = strum;
+                    gamepad_state.sThumbRX = whammy;
+                    gamepad_state.sThumbRY = tilt;
+                    break;
+                }
+                case gh_guitar:
+                {
+                    PS3GuitarHeroGuitar_Data_t *report = (PS3GuitarHeroGuitar_Data_t *)data;
+                    if (report->a)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                    if (report->b)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                    if (report->x)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                    if (report->y)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                    if (report->leftShoulder)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                    if (up)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                    if (down)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                    if (left)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                    if (right)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                    if (report->start)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                    if (report->back)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+
+                    int32_t whammy = (report->whammy << 9) - 32767;
+                    gamepad_state.sThumbRX = whammy;
+                    gamepad_state.sThumbLX = (report->slider ^ 0x80) << 8;
+                    gamepad_state.sThumbRY = -((report->tilt - 511) << 8);
+                    break;
+                }
+                case rb_guitar:
+                {
+                    PS3RockBandGuitar_Data_t *report = (PS3RockBandGuitar_Data_t *)data;
+                    if (report->a)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                    if (report->b)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                    if (report->x)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                    if (report->y)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                    if (report->solo)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+                    if (report->leftShoulder)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                    if (up)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                    if (down)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                    if (left)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                    if (right)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                    if (report->start)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                    if (report->back)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+
+                    // ps3 rb whammy and pickup resets ot 0x7f when not touched, so ignore that state
+                    int32_t whammy = (report->whammy << 8) - 32767;
+                    gamepad_state.sThumbRX = whammy == 0x7f ? last_whammy : whammy;
+                    gamepad_state.bLeftTrigger = report->pickup == 0x7f ? last_pickup : report->pickup;
+                    gamepad_state.sThumbRY = report->tilt ? 32767 : 0;
+                    break;
+                }
+                case rb_drum:
+                {
+                    PS3RockBandDrums_Data_t *report = (PS3RockBandDrums_Data_t *)data;
+                    if (report->a)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                    if (report->b)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                    if (report->x)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                    if (report->y)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                    if (report->kick1)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                    if (report->kick2)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+                    if (up)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                    if (down)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                    if (left)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                    if (right)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                    if (report->start)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                    if (report->back)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+                    if (report->padFlag)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_THUMB;
+                    if (report->cymbalFlag)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+                    break;
+                }
+                case gh_drum:
+                {
+                    PS3GuitarHeroDrums_Data_t *report = (PS3GuitarHeroDrums_Data_t *)data;
+                    if (report->a)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                    if (report->b)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                    if (report->x)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                    if (report->y)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                    if (report->leftShoulder)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                    if (report->rightShoulder)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+                    if (up)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                    if (down)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                    if (left)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                    if (right)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                    if (report->start)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                    if (report->back)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+                    break;
+                }
+
+                case turntable:
+                {
+                    PS3DJHTurntable_Data_t *report = (PS3DJHTurntable_Data_t *)data;
+                    if (report->a)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                    if (report->b)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                    if (report->x)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                    if (report->y)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                    if (up)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                    if (down)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                    if (left)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                    if (right)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                    if (report->start)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                    if (report->back)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+
+                    if (report->leftGreen)
+                        gamepad_state.bLeftTrigger |= 0b001;
+                    if (report->leftRed)
+                        gamepad_state.bLeftTrigger |= 0b010;
+                    if (report->leftBlue)
+                        gamepad_state.bLeftTrigger |= 0b100;
+                    if (report->rightGreen)
+                        gamepad_state.bRightTrigger |= 0b001;
+                    if (report->rightRed)
+                        gamepad_state.bRightTrigger |= 0b010;
+                    if (report->rightBlue)
+                        gamepad_state.bRightTrigger |= 0b100;
+
+                    // scratching on xinput uses a tiny range
+                    gamepad_state.sThumbLX = (report->leftTableVelocity >> 1) - 64;
+                    gamepad_state.sThumbLY = (report->rightTableVelocity >> 1) - 64;
+                    gamepad_state.sThumbRX = (report->effectsKnob << 6);
+                    gamepad_state.sThumbRY = -(report->crossfader << 6);
+                    break;
+                }
+                }
+            }
+        }
+        if (controllers[index].caps.console_type == santroller)
+        {
+
+            PCGamepad_Data_t *report = (PCGamepad_Data_t *)data;
+            uint8_t dpad = report->dpad >= 0x08 ? 0 : dpad_bindings_reverse[report->dpad];
+            bool up = dpad & UP;
+            bool left = dpad & LEFT;
+            bool down = dpad & DOWN;
+            bool right = dpad & RIGHT;
+            switch (controllers[index].caps.device_type)
+            {
+            case live_guitar:
+            {
+                PCGHLGuitar_Data_t *report = (PCGHLGuitar_Data_t *)data;
+                if (report->a)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                if (report->b)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                if (report->x)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                if (report->y)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                if (report->leftShoulder)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                if (report->rightShoulder)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+                if (report->leftThumbClick)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+                if (up)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                if (down)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                if (left)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                if (right)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                if (report->start)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                if (report->back)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+
+                int32_t whammy = (report->whammy << 8) - 32767;
+                int32_t tilt = ((report->tilt & 0xFF) << 8) - 32767;
+                gamepad_state.sThumbLX = 0;
+                gamepad_state.sThumbLY = up ? 32767 : down ? -32767
+                                                           : 0;
+                gamepad_state.sThumbRX = whammy;
+                gamepad_state.sThumbRY = tilt;
+                break;
+            }
+            case gh_guitar:
+            {
+                PCGuitarHeroGuitar_Data_t *report = (PCGuitarHeroGuitar_Data_t *)data;
+                if (report->a)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                if (report->b)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                if (report->x)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                if (report->y)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                if (report->leftShoulder)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                if (up)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                if (down)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                if (left)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                if (right)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                if (report->start)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                if (report->back)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+
+                int32_t whammy = (report->whammy << 9) - 32767;
+                gamepad_state.sThumbRX = whammy;
+                gamepad_state.sThumbLX = (report->slider ^ 0x80) << 8;
+                gamepad_state.sThumbRY = -((report->tilt - 511) << 8);
+                break;
+            }
+            case rb_guitar:
+            {
+                PCRockBandGuitar_Data_t *report = (PCRockBandGuitar_Data_t *)data;
+                if (report->a || report->soloGreen)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                if (report->b || report->soloRed)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                if (report->x || report->soloYellow)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                if (report->y || report->soloBlue)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                if (report->leftShoulder || report->soloOrange)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                if (report->soloGreen || report->soloRed || report->soloOrange || report->soloYellow || report->soloBlue)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+                if (up)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                if (down)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                if (left)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                if (right)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                if (report->start)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                if (report->back)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+
+                // ps3 rb whammy and pickup resets ot 0x7f when not touched, so ignore that state
+                int32_t whammy = (report->whammy << 8) - 32767;
+                gamepad_state.sThumbRX = whammy == 0x7f ? last_whammy : whammy;
+                gamepad_state.bLeftTrigger = report->pickup == 0x7f ? last_pickup : report->pickup;
+                gamepad_state.sThumbRY = report->tilt ? 32767 : 0;
+                break;
+            }
+            case rb_drum:
+            {
+                PCRockBandDrums_Data_t *report = (PCRockBandDrums_Data_t *)data;
+                if (report->a)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                if (report->b)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                if (report->x)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                if (report->y)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                if (report->kick1)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                if (report->kick2)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+                if (up)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                if (down)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                if (left)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                if (right)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                if (report->start)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                if (report->back)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+                if (report->padFlag)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_THUMB;
+                if (report->cymbalFlag)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+                break;
+            }
+            case gh_drum:
+            {
+                PCGuitarHeroDrums_Data_t *report = (PCGuitarHeroDrums_Data_t *)data;
+                if (report->a)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                if (report->b)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                if (report->x)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                if (report->y)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                if (report->leftShoulder)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                if (report->rightShoulder)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+                if (up)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                if (down)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                if (left)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                if (right)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                if (report->start)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                if (report->back)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+                break;
+            }
+
+            case turntable:
+            {
+                PCTurntable_Data_t *report = (PCTurntable_Data_t *)data;
+                if (report->a)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                if (report->b)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                if (report->x)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                if (report->y)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                if (up)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                if (down)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                if (left)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                if (right)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                if (report->start)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                if (report->back)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+
+                if (report->leftGreen)
+                    gamepad_state.bLeftTrigger |= 0b001;
+                if (report->leftRed)
+                    gamepad_state.bLeftTrigger |= 0b010;
+                if (report->leftBlue)
+                    gamepad_state.bLeftTrigger |= 0b100;
+                if (report->rightGreen)
+                    gamepad_state.bRightTrigger |= 0b001;
+                if (report->rightRed)
+                    gamepad_state.bRightTrigger |= 0b010;
+                if (report->rightBlue)
+                    gamepad_state.bRightTrigger |= 0b100;
+
+                // scratching on xinput uses a tiny range
+                gamepad_state.sThumbLX = (report->leftTableVelocity >> 1) - 64;
+                gamepad_state.sThumbLY = (report->rightTableVelocity >> 1) - 64;
+                gamepad_state.sThumbRX = (report->effectsKnob << 6);
+                gamepad_state.sThumbRY = -(report->crossfader << 6);
+                break;
+            }
+            case gamepad:
+            {
+                if (report->a)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                if (report->b)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                if (report->x)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                if (report->y)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                if (report->leftShoulder)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                if (report->rightShoulder)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+                if (report->dpadUp)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                if (report->dpadDown)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                if (report->dpadLeft)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                if (report->dpadRight)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                if (report->start)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                if (report->back)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+                gamepad_state.sThumbLX = (report->leftStickX << 8) - 32767;
+                gamepad_state.sThumbLY = (report->leftStickY << 8) - 32767;
+                gamepad_state.sThumbRX = (report->rightStickX << 8) - 32767;
+                gamepad_state.sThumbRY = (report->rightStickY << 8) - 32767;
+                break;
+            }
+            }
+        }
+        if (controllers[index].caps.console_type == raphnet_wii)
+        {
+            switch (controllers[index].caps.device_type)
+            {
+            case gh_guitar:
+            {
+                RaphnetGuitar_Data_t *report = (RaphnetGuitar_Data_t *)data;
+                if (report->green)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                if (report->red)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                if (report->yellow)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                if (report->blue)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                if (report->orange)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                if (report->up)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                if (report->down)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                if (report->plus)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                if (report->minus)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+
+                gamepad_state.sThumbLX = report->slider;
+                gamepad_state.sThumbRX = report->whammy;
+                break;
+            }
+            case gh_drum:
+            {
+                RaphnetDrum_Data_t *report = (RaphnetDrum_Data_t *)data;
+                if (report->green)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                if (report->red)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                if (report->yellow)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                if (report->blue)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                if (report->orange)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                if (report->plus)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                if (report->minus)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+                break;
+            }
+            case gamepad:
+            {
+                RaphnetGamepad_Data_t *report = (RaphnetGamepad_Data_t *)data;
+                if (report->a)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                if (report->b)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                if (report->x)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                if (report->y)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                if (report->leftShoulder)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                if (report->rightShoulder)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+                if (report->up)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                if (report->down)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                if (report->left)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                if (report->right)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                if (report->start)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                if (report->select)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+                gamepad_state.sThumbLX = report->leftJoyX;
+                gamepad_state.sThumbLY = report->leftJoyY;
+                gamepad_state.sThumbRX = report->rightJoyX;
+                gamepad_state.sThumbRY = report->rightJoyY;
+                break;
+            }
+            }
+        }
+        if (caps.console_type == ps4)
+        {
+
+            PS4Dpad_Data_t *report = (PS4Dpad_Data_t *)data;
+            uint8_t dpad = report->dpad >= 0x08 ? 0 : dpad_bindings_reverse[report->dpad];
+            bool up = dpad & UP;
+            bool left = dpad & LEFT;
+            bool down = dpad & DOWN;
+            bool right = dpad & RIGHT;
+            switch (caps.device_type)
+            {
+            case rb_guitar:
+            {
+                PS4RockBandGuitar_Data_t *report = (PS4RockBandGuitar_Data_t *)data;
+                if (report->a)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                if (report->b)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                if (report->x)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                if (report->y)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                if (report->solo)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+                if (report->leftShoulder)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                if (up)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                if (down)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                if (left)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                if (right)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                if (report->start)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                if (report->back)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+
+                int32_t whammy = (report->whammy << 8) - 32767;
+                gamepad_state.sThumbRX = whammy;
+                gamepad_state.bLeftTrigger = pickup_vals[report->pickup];
+                gamepad_state.sThumbRY = (report->tilt << 7);
+                break;
+            }
+            case rb_drum:
+            {
+                PS4RockBandDrums_Data_t *report = (PS4RockBandDrums_Data_t *)data;
+                if (report->a)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                if (report->b)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                if (report->x)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                if (report->y)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                if (report->kick1)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                if (report->kick2)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+                if (up)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                if (down)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                if (left)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                if (right)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                if (report->start)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                if (report->back)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+                if (report->yellowCymbalVelocity)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER | XINPUT_GAMEPAD_DPAD_UP;
+                if (report->blueCymbalVelocity)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER | XINPUT_GAMEPAD_DPAD_DOWN;
+                if (report->greenCymbalVelocity)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+
+                break;
+            }
+            case live_guitar:
+            {
+                PS4GHLGuitar_Data_t *report = (PS4GHLGuitar_Data_t *)data;
+                if (report->a)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                if (report->b)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                if (report->x)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                if (report->y)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                if (report->leftShoulder)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                if (report->rightShoulder)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+                if (report->leftThumbClick)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+                if (up)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                if (down)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                if (left)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                if (right)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                if (report->start)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                if (report->back)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+
+                int32_t whammy = (report->whammy << 8) - 32767;
+                int32_t strum = (report->strumBar << 8) - 32767;
+                int32_t tilt = ((report->tilt & 0xFF) << 8) - 32767;
+                gamepad_state.sThumbLX = 0;
+                gamepad_state.sThumbLY = strum;
+                gamepad_state.sThumbRX = whammy;
+                gamepad_state.sThumbRY = tilt;
+                break;
+            }
+            }
+        }
+        if (caps.console_type == ps5)
+        {
+
+            PS5Dpad_Data_t *report = (PS5Dpad_Data_t *)data;
+            uint8_t dpad = report->dpad >= 0x08 ? 0 : dpad_bindings_reverse[report->dpad];
+            bool up = dpad & UP;
+            bool left = dpad & LEFT;
+            bool down = dpad & DOWN;
+            bool right = dpad & RIGHT;
+            switch (caps.device_type)
+            {
+            case rb_guitar:
+            {
+                PS5RockBandGuitar_Data_t *report = (PS5RockBandGuitar_Data_t *)data;
+                if (report->a)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                if (report->b)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                if (report->x)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                if (report->y)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                if (report->solo)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+                if (report->leftShoulder)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                if (up)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                if (down)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                if (left)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                if (right)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                if (report->start)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                if (report->back)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+
+                int32_t whammy = (report->whammy << 8) - 32767;
+                gamepad_state.sThumbRX = whammy;
+                gamepad_state.bLeftTrigger = pickup_vals[report->pickup];
+                gamepad_state.sThumbRY = (report->tilt << 7);
+                break;
+            }
+            case rb_drum:
+            {
+                PS5RockBandDrums_Data_t *report = (PS5RockBandDrums_Data_t *)data;
+                if (report->a)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                if (report->b)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                if (report->x)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                if (report->y)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                if (report->kick1)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                if (report->kick2)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+                if (up)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                if (down)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                if (left)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                if (right)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+                if (report->start)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                if (report->back)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+                if (report->yellowCymbalVelocity)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER | XINPUT_GAMEPAD_DPAD_UP;
+                if (report->blueCymbalVelocity)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER | XINPUT_GAMEPAD_DPAD_DOWN;
+                if (report->greenCymbalVelocity)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+
+                break;
+            }
+            }
+        }
     }
     else
-        memset(&gamepad, 0, sizeof(XINPUT_GAMEPAD_EX));
+        memset(&gamepad_state, 0, sizeof(XINPUT_GAMEPAD));
 
-    if (memcmp(&controllers[index].state_ex.Gamepad, &gamepad, sizeof(XINPUT_GAMEPAD_EX)))
+    if (memcmp(&controllers[index].state.Gamepad, &gamepad_state, sizeof(XINPUT_GAMEPAD)))
     {
-        controllers[index].state_ex.Gamepad = gamepad;
-        controllers[index].state_ex.dwPacketNumber++;
+        controllers[index].state.Gamepad = gamepad_state;
+        controllers[index].state.dwPacketNumber++;
     }
 }
 
@@ -1197,6 +1815,43 @@ void dumb_Init(DWORD version)
 void dumb_Cleanup()
 {
     // Does nothing as well
+}
+
+DWORD dumb_XInputGetStateEx(DWORD index, XINPUT_STATE *state, DWORD caller_version)
+{
+    // TRACE("dumb_XInputGetStateEx (%u %p)\n", index, state_ex);
+
+    if (!initialized)
+    {
+        DPRINT("Force-enabling dumb XInput\n");
+        dumb_XInputEnable(TRUE);
+    }
+
+    if (index >= XUSER_MAX_COUNT)
+        return ERROR_BAD_ARGUMENTS;
+    if (!controllers[index].connected)
+    {
+        return ERROR_DEVICE_NOT_CONNECTED;
+    }
+
+    if (controllers[index].xinput_index != -1)
+    {
+        int ret = (ProcXInputGetStateEx)(controllers[index].xinput_index, state);
+        if (ret == ERROR_DEVICE_NOT_CONNECTED)
+        {
+            controllers[index].connected = false;
+        }
+        return ret;
+    }
+
+    dinput_update(index);
+    if (controllers[index].caps.ps2needschecking)
+    {
+        return ERROR_DEVICE_NOT_CONNECTED;
+    }
+    *state = controllers[index].state;
+
+    return ERROR_SUCCESS;
 }
 
 /* ============================ Dll Functions =============================== */
@@ -1226,60 +1881,15 @@ DWORD dumb_XInputGetState(DWORD index, XINPUT_STATE *state, DWORD caller_version
         return ret;
     }
 
-    union
-    {
-        XINPUT_STATE state;
-        XINPUT_STATE_EX state_ex;
-    } xinput;
     DWORD ret;
 
     // TRACE("dumb_XInputGetState: %d\n", index);
 
-    ret = dumb_XInputGetStateEx(index, &xinput.state_ex, caller_version);
+    ret = dumb_XInputGetStateEx(index, state, caller_version);
     if (ret != ERROR_SUCCESS)
         return ret;
 
-    /* The main difference between this and the Ex version is the media guide button */
-    *state = xinput.state;
     state->Gamepad.wButtons &= ~XINPUT_GAMEPAD_GUIDE;
-
-    return ERROR_SUCCESS;
-}
-
-DWORD dumb_XInputGetStateEx(DWORD index, XINPUT_STATE_EX *state_ex, DWORD caller_version)
-{
-    // TRACE("dumb_XInputGetStateEx (%u %p)\n", index, state_ex);
-
-    if (!initialized)
-    {
-        DPRINT("Force-enabling dumb XInput\n");
-        dumb_XInputEnable(TRUE);
-    }
-
-    if (index >= XUSER_MAX_COUNT)
-        return ERROR_BAD_ARGUMENTS;
-    if (!controllers[index].connected)
-    {
-        return ERROR_DEVICE_NOT_CONNECTED;
-    }
-
-    if (controllers[index].xinput_index != -1)
-    {
-        int ret = (ProcXInputGetStateEx)(controllers[index].xinput_index, state_ex);
-        if (ret == ERROR_DEVICE_NOT_CONNECTED)
-        {
-            controllers[index].connected = false;
-        }
-        return ret;
-    }
-
-    dinput_update(index);
-    if (controllers[index].caps.ps2needschecking)
-    {
-        return ERROR_DEVICE_NOT_CONNECTED;
-    }
-    // broforce does not pass a correct XINPUT_STATE_EX, so only copy the old struct size
-    *state_ex = controllers[index].state_ex;
 
     return ERROR_SUCCESS;
 }
@@ -1309,7 +1919,7 @@ DWORD dumb_XInputSetState(DWORD index, XINPUT_VIBRATION *vibration, DWORD caller
 
         TRACE("Vibration left/right speed %d/%d translated to %d\n\n",
               vibration->wLeftMotorSpeed, vibration->wRightMotorSpeed, power);
-        dinput_send_effect(index, power);
+        // dinput_send_effect(index, power);
     }
 
     return ERROR_SUCCESS;
@@ -1369,16 +1979,16 @@ DWORD dumb_XInputGetCapabilities(DWORD index, DWORD flags,
     capabilities->Type = XINPUT_DEVTYPE_GAMEPAD;
 
     capabilities->Flags = 0;
-    if (controllers[index].caps.jedi)
+    if (controllers[index].caps.jedi || controllers[index].caps.device_type == rb_drum)
         capabilities->Flags |= XINPUT_CAPS_FFB_SUPPORTED;
-    if (!controllers[index].caps.pov)
+    if (!controllers[index].caps.pov || controllers[index].caps.device_type == live_guitar)
         capabilities->Flags |= XINPUT_CAPS_NO_NAVIGATION;
 
     dinput_update(index);
 
     capabilities->SubType = controllers[index].caps.subtype;
     capabilities->Vibration = controllers[index].vibration;
-    capabilities->Gamepad = *(XINPUT_GAMEPAD *)&controllers[index].state_ex.Gamepad;
+    capabilities->Gamepad = controllers[index].state.Gamepad;
     TRACE("dumb_XInputGetCapabilities (%d)\n", capabilities->SubType);
 
     return ERROR_SUCCESS;

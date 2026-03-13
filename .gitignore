@@ -34,3 +34,4 @@
 .vscode
 !dlls/*
 build.zip
+build/**/input_config.ini
