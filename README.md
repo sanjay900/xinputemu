@@ -3,6 +3,8 @@ Santroller xinput Emulator
 
 This is an xinput dll reimplementation compatible with DirectInput controllers. Think of x360ce without the configuration. For supported instruments, it makes sure to set the correct subtype.
 
+For linux, you will need to make sure you have udev rules that all access to hidraw, as we now talk to devices raw so we get more control.
+
 Supported instruments:
 - Santroller Guitars and adapters (works on windows and linux)
 - PS3 RB / GH (requires disabling SDL for wine, just works on windows)
