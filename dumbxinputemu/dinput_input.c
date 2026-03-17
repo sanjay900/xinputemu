@@ -13,6 +13,7 @@
 #include "ps4.h"
 #include "ps5.h"
 #include "raphnet_reports.h"
+#include <pthread.h>
 typedef enum
 {
     gamepad,
@@ -646,8 +647,9 @@ void print_device(struct hid_device_info *cur_dev)
     controllers[dinput.mapped].connected = TRUE;
     controllers[dinput.mapped].device = hid_open_path(cur_dev->path);
     hid_device *device = controllers[dinput.mapped].device;
+    hid_set_nonblocking(device, 1);
     dinput_fill_caps(&controllers[dinput.mapped].caps, MAKELONG(cur_dev->vendor_id, cur_dev->product_id), cur_dev->release_number);
-    
+
     if (controllers[dinput.mapped].caps.console_type == raphnet_wii || controllers[dinput.mapped].caps.console_type == raphnet_ps2)
     {
         // config interface follows gamepad interface
@@ -714,7 +716,7 @@ void print_devices_with_descriptor(struct hid_device_info *cur_dev)
             printf("found xinput, skipping\n");
             continue;
         }
-        if (cur_dev->usage != HID_USAGE_GENERIC_JOYSTICK && cur_dev->usage != HID_USAGE_GENERIC_GAMEPAD)
+        if (!(cur_dev->usage == HID_USAGE_GENERIC_JOYSTICK || cur_dev->usage == HID_USAGE_GENERIC_GAMEPAD) || cur_dev->usage_page != HID_USAGE_PAGE_GENERIC)
         {
             continue;
         }
@@ -784,171 +786,6 @@ static int string_ends_with(const char *str, const char *suffix)
     return (str_len >= suffix_len) &&
            (0 == strcmp(str + (str_len - suffix_len), suffix));
 }
-static void dinput_start(void)
-{
-    HRESULT hr;
-    if (initialized)
-        return;
-    initialized = TRUE;
-    HINSTANCE hinstLib;
-    HINSTANCE hinstLibD;
-
-    CONSOLE_SCREEN_BUFFER_INFO csbi;
-
-    // Create a new console window.
-    if (ShowConsole() && AllocConsole()) {
-
-        // Set the screen buffer to be larger than normal (this is optional).
-        if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi))
-        {
-            csbi.dwSize.Y = 1000; // any useful number of lines...
-            SetConsoleScreenBufferSize(GetStdHandle(STD_OUTPUT_HANDLE), csbi.dwSize);
-        }
-
-        // Redirect "stdin" to the console window.
-        freopen("CONIN$", "w", stdin);
-
-        // Redirect "stderr" to the console window.
-        freopen("CONOUT$", "w", stderr);
-
-        // Redirect "stdout" to the console window.
-        freopen("CONOUT$", "w", stdout);
-
-        // Turn off buffering for "stdout" ("stderr" is unbuffered by default).
-
-        setbuf(stdout, NULL);
-    }
-    // Enable hidraw for direct access to controllers on linux
-    if (KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine") || KeyExists(HKEY_CURRENT_USER, L"Software\\Wine"))
-    {
-        // if any of them are updated, pop up a msgbox saying that the prefix needs to be restarted
-        static const uint16_t vendors[] = {
-            0x12ba,
-            0x1209,
-            0x1bad,
-            0x3651,
-            0x289b,
-            0x0e6f,
-            0x0738,
-            0x1430,
-            0x1122};
-        wchar_t regKey[64];
-        bool updated = false;
-        for (int i = 0; i < sizeof(vendors) / sizeof(vendors[0]); i++)
-        {
-            swprintf(regKey, sizeof(regKey), L"System\\CurrentControlSet\\Services\\WineBus\\Devices\\%04x", vendors[i]);
-            updated |= UpdateKey(HKEY_LOCAL_MACHINE, regKey, L"HidRaw", 1);
-        }
-        if (updated)
-        {
-            int msgboxID = MessageBoxW(
-                NULL,
-                (LPCWSTR)L"Device entries changed, please restart your wine prefix",
-                (LPCWSTR)L"Warning",
-                MB_ICONWARNING | MB_OK);
-        }
-    }
-
-    override_rb = OverrideRbWithGh();
-    override_wireless = OverrideWireless();
-    if (LoadLibraryW(L"wh.dll") != NULL)
-    {
-        TRACE("found wh\r\n");
-    }
-    // Get a handle to the DLL module.
-    bool hasEx = true;
-    hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_4.dll");
-    if (hinstLib == NULL)
-    {
-        hasEx = false;
-        hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_3.dll");
-    }
-    if (hinstLib == NULL)
-    {
-        hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_2.dll");
-    }
-    if (hinstLib == NULL)
-    {
-        hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_1.dll");
-    }
-    if (hinstLib == NULL)
-    {
-        hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput9_1_0.dll");
-    }
-
-    // If the handle is valid, try to get the function address.
-
-    if (hinstLib != NULL)
-    {
-        TRACE("found dll\r\n");
-        ProcXInputGetState = (_XInputGetState)GetProcAddress(hinstLib, "XInputGetState");
-        ProcXInputGetStateEx = (_XInputGetStateEx)GetProcAddress(hinstLib, (LPCSTR)100);
-        ProcXInputGetCapabilitiesEx = (_XInputGetCapabilitiesEx)GetProcAddress(hinstLib, (LPCSTR)108);
-        ;
-        ProcXInputGetCapabilities = (_XInputGetCapabilities)GetProcAddress(hinstLib, "XInputGetCapabilities");
-
-        // If the function address is valid, call the function.
-
-        if (NULL != XInputGetState && NULL != XInputGetCapabilitiesEx && hasEx)
-        {
-            for (int i = 0; i < 4; i++)
-            {
-                XINPUT_CAPABILITIES_EX caps2;
-                if ((ProcXInputGetCapabilitiesEx)(1, i, 0, &caps2) != ERROR_DEVICE_NOT_CONNECTED)
-                {
-                    TRACE("xinput vid: %04x, pid: %04x!\n", caps2.VendorId, caps2.ProductId);
-                    TRACE("found xinput device, proxying\r\n");
-                    controllers[dinput.mapped].xinput_index = i;
-                    controllers[dinput.mapped].connected = TRUE;
-                    controllers[dinput.mapped].caps.subtype = caps2.Capabilities.SubType;
-                    dinput_fill_caps(&controllers[dinput.mapped].caps, MAKELONG(caps2.VendorId, caps2.ProductId), caps2.VersionNumber);
-                    if (caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GUITAR && override_rb)
-                    {
-                        TRACE("found RB guitar, proxying as GH guitar\r\n");
-                        controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-                    }
-                    if (caps2.VendorId == 0x1BAD && caps2.ProductId == 0x0719)
-                    {
-                        TRACE("Found clipper / rb4instrumentmapper, proxying as GH guitar!\n");
-                        controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-                    }
-                    if (caps2.VendorId == 0x1430 && caps2.ProductId == 0x4734)
-                    {
-                        TRACE("Found wiitarthing, proxying as GH guitar!\n");
-                        controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-                    }
-                    dinput.mapped++;
-                }
-            }
-        }
-        else if (NULL != XInputGetState && NULL != XInputGetCapabilities)
-        {
-            TRACE("found procs\r\n");
-            for (int i = 0; i < 4; i++)
-            {
-                XINPUT_CAPABILITIES caps;
-                if ((ProcXInputGetCapabilities)(i, 0, &caps) != ERROR_DEVICE_NOT_CONNECTED && caps.SubType == XINPUT_DEVSUBTYPE_GAMEPAD)
-                {
-                    TRACE("found xinput gamepad, proxying\r\n");
-                    controllers[dinput.mapped].xinput_index = i;
-                    controllers[dinput.mapped].connected = TRUE;
-                    dinput.mapped++;
-                }
-            }
-        }
-    }
-    else
-    {
-
-        TRACE("unable to find xinput1_3\r\n");
-    }
-    dinput.enabled = TRUE;
-    struct hid_device_info *devs;
-    hid_init();
-    devs = hid_enumerate(0x0, 0x0);
-    print_devices_with_descriptor(devs);
-    hid_free_enumeration(devs);
-}
 static const uint8_t pickup_vals[] = {0x17, 0x4B, 0x79, 0xAB, 0xE0};
 uint8_t ps3_ghl_wakeup[] = {0x00, 0x02, 0x08, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00};
 uint8_t ps4_ghl_wakeup[] = {0x30, 0x02, 0x08, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00};
@@ -983,7 +820,7 @@ static void dinput_update(int index)
             }
         }
         uint8_t data[64];
-        int size = hid_read_timeout(controllers[index].device, data, sizeof(data), 1);
+        int size = hid_read(controllers[index].device, data, sizeof(data));
         if (!size)
         {
             return;
@@ -1822,6 +1659,190 @@ static void dinput_update(int index)
     }
 }
 
+static unsigned __stdcall dinput_update_all(void *argument)
+{
+    while (1)
+    {
+        for (int index = 0; index < XUSER_MAX_COUNT; index++)
+        {
+            if (controllers[index].connected && controllers[index].xinput_index == -1)
+            {
+                dinput_update(index);
+            }
+        }
+    }
+}
+HANDLE hThread;
+unsigned threadID;
+static void dinput_start(void)
+{
+    HRESULT hr;
+    if (initialized)
+        return;
+    initialized = TRUE;
+    HINSTANCE hinstLib;
+    HINSTANCE hinstLibD;
+
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+
+    // Create a new console window.
+    if (ShowConsole() && AllocConsole())
+    {
+
+        // Set the screen buffer to be larger than normal (this is optional).
+        if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi))
+        {
+            csbi.dwSize.Y = 1000; // any useful number of lines...
+            SetConsoleScreenBufferSize(GetStdHandle(STD_OUTPUT_HANDLE), csbi.dwSize);
+        }
+
+        // Redirect "stdin" to the console window.
+        freopen("CONIN$", "w", stdin);
+
+        // Redirect "stderr" to the console window.
+        freopen("CONOUT$", "w", stderr);
+
+        // Redirect "stdout" to the console window.
+        freopen("CONOUT$", "w", stdout);
+
+        // Turn off buffering for "stdout" ("stderr" is unbuffered by default).
+
+        setbuf(stdout, NULL);
+    }
+    // Enable hidraw for direct access to controllers on linux
+    if (KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine") || KeyExists(HKEY_CURRENT_USER, L"Software\\Wine"))
+    {
+        // if any of them are updated, pop up a msgbox saying that the prefix needs to be restarted
+        static const uint16_t vendors[] = {
+            0x12ba,
+            0x1209,
+            0x1bad,
+            0x3651,
+            0x289b,
+            0x0e6f,
+            0x0738,
+            0x1430,
+            0x1122};
+        wchar_t regKey[64];
+        bool updated = false;
+        for (int i = 0; i < sizeof(vendors) / sizeof(vendors[0]); i++)
+        {
+            swprintf(regKey, sizeof(regKey), L"System\\CurrentControlSet\\Services\\WineBus\\Devices\\%04x", vendors[i]);
+            updated |= UpdateKey(HKEY_LOCAL_MACHINE, regKey, L"HidRaw", 1);
+        }
+        if (updated)
+        {
+            int msgboxID = MessageBoxW(
+                NULL,
+                (LPCWSTR)L"Device entries changed, please restart your wine prefix",
+                (LPCWSTR)L"Warning",
+                MB_ICONWARNING | MB_OK);
+        }
+    }
+
+    override_rb = OverrideRbWithGh();
+    override_wireless = OverrideWireless();
+    if (LoadLibraryW(L"wh.dll") != NULL)
+    {
+        TRACE("found wh\r\n");
+    }
+    // Get a handle to the DLL module.
+    bool hasEx = true;
+    hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_4.dll");
+    if (hinstLib == NULL)
+    {
+        hasEx = false;
+        hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_3.dll");
+    }
+    if (hinstLib == NULL)
+    {
+        hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_2.dll");
+    }
+    if (hinstLib == NULL)
+    {
+        hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput1_1.dll");
+    }
+    if (hinstLib == NULL)
+    {
+        hinstLib = LoadLibraryW(L"C:\\Windows\\System32\\xinput9_1_0.dll");
+    }
+
+    // If the handle is valid, try to get the function address.
+
+    if (hinstLib != NULL)
+    {
+        TRACE("found dll\r\n");
+        ProcXInputGetState = (_XInputGetState)GetProcAddress(hinstLib, "XInputGetState");
+        ProcXInputGetStateEx = (_XInputGetStateEx)GetProcAddress(hinstLib, (LPCSTR)100);
+        ProcXInputGetCapabilitiesEx = (_XInputGetCapabilitiesEx)GetProcAddress(hinstLib, (LPCSTR)108);
+        ;
+        ProcXInputGetCapabilities = (_XInputGetCapabilities)GetProcAddress(hinstLib, "XInputGetCapabilities");
+
+        // If the function address is valid, call the function.
+
+        if (NULL != XInputGetState && NULL != XInputGetCapabilitiesEx && hasEx)
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                XINPUT_CAPABILITIES_EX caps2;
+                if ((ProcXInputGetCapabilitiesEx)(1, i, 0, &caps2) != ERROR_DEVICE_NOT_CONNECTED)
+                {
+                    TRACE("xinput vid: %04x, pid: %04x!\n", caps2.VendorId, caps2.ProductId);
+                    TRACE("found xinput device, proxying\r\n");
+                    controllers[dinput.mapped].xinput_index = i;
+                    controllers[dinput.mapped].connected = TRUE;
+                    controllers[dinput.mapped].caps.subtype = caps2.Capabilities.SubType;
+                    dinput_fill_caps(&controllers[dinput.mapped].caps, MAKELONG(caps2.VendorId, caps2.ProductId), caps2.VersionNumber);
+                    if (caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GUITAR && override_rb)
+                    {
+                        TRACE("found RB guitar, proxying as GH guitar\r\n");
+                        controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+                    }
+                    if (caps2.VendorId == 0x1BAD && caps2.ProductId == 0x0719)
+                    {
+                        TRACE("Found clipper / rb4instrumentmapper, proxying as GH guitar!\n");
+                        controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+                    }
+                    if (caps2.VendorId == 0x1430 && caps2.ProductId == 0x4734)
+                    {
+                        TRACE("Found wiitarthing, proxying as GH guitar!\n");
+                        controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+                    }
+                    dinput.mapped++;
+                }
+            }
+        }
+        else if (NULL != XInputGetState && NULL != XInputGetCapabilities)
+        {
+            TRACE("found procs\r\n");
+            for (int i = 0; i < 4; i++)
+            {
+                XINPUT_CAPABILITIES caps;
+                if ((ProcXInputGetCapabilities)(i, 0, &caps) != ERROR_DEVICE_NOT_CONNECTED && caps.SubType == XINPUT_DEVSUBTYPE_GAMEPAD)
+                {
+                    TRACE("found xinput gamepad, proxying\r\n");
+                    controllers[dinput.mapped].xinput_index = i;
+                    controllers[dinput.mapped].connected = TRUE;
+                    dinput.mapped++;
+                }
+            }
+        }
+    }
+    else
+    {
+
+        TRACE("unable to find xinput1_3\r\n");
+    }
+    dinput.enabled = TRUE;
+    struct hid_device_info *devs;
+    hid_init();
+    devs = hid_enumerate(0x0, 0x0);
+    print_devices_with_descriptor(devs);
+    hid_free_enumeration(devs);
+    hThread = (HANDLE)_beginthreadex(NULL, 0, &dinput_update_all, NULL, 0,
+                                     &threadID);
+}
+
 void dumb_Init(DWORD version)
 {
     // Does nothing
@@ -1859,7 +1880,6 @@ DWORD dumb_XInputGetStateEx(DWORD index, XINPUT_STATE *state, DWORD caller_versi
         return ret;
     }
 
-    dinput_update(index);
     if (controllers[index].caps.ps2needschecking)
     {
         return ERROR_DEVICE_NOT_CONNECTED;
@@ -2002,8 +2022,6 @@ DWORD dumb_XInputGetCapabilities(DWORD index, DWORD flags,
         capabilities->Flags |= XINPUT_CAPS_FFB_SUPPORTED;
     if (!controllers[index].caps.pov || controllers[index].caps.device_type == live_guitar)
         capabilities->Flags |= XINPUT_CAPS_NO_NAVIGATION;
-
-    dinput_update(index);
 
     capabilities->SubType = controllers[index].caps.subtype;
     capabilities->Vibration = controllers[index].vibration;
