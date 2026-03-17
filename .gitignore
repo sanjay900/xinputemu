@@ -34,5 +34,6 @@
 .vscode
 !dlls/*
 build.zip
+build_gh3.zip
 build/**/input_config.ini
 uwhr.log

@@ -89,13 +89,18 @@ clean:
 	rm -f build/32/*
 	rm -f build/64/*
 
-winetricks-verb:
+build_normal:
 	rm -rf build.zip
 	cp input_config.ini build/32
 	cp dlls/* build/32
 	cp hidapi-win/x86/hidapi.dll build/32
 	cp hidapi-win/x64/hidapi.dll build/64
 	zip -r build.zip build/*
+
+build_gh3:
+	rm -rf build_gh3.zip
+	cp input_config_gh3.ini build/32/input_config.ini
+	zip -r build_gh3.zip build/*
 
 32bit: build/32/xinput1_3.dll build/32/xinput1_4.dll build/32/xinput9_1_0.dll
 
@@ -106,7 +111,8 @@ all: clean \
 	build/32/xinput1_4.dll build/32/xinput9_1_0.dll \
 	build/64/xinput1_1.dll build/64/xinput1_2.dll build/64/xinput1_3.dll \
 	build/64/xinput1_4.dll build/64/xinput9_1_0.dll \
-	winetricks-verb
+	build_normal \
+	build_gh3
 
 run:
 	cp input_config_debug.ini build/32/input_config.ini
