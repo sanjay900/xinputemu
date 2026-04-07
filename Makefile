@@ -100,7 +100,7 @@ build_normal:
 build_gh3:
 	rm -rf build_gh3.zip
 	cp input_config_gh3.ini build/32/input_config.ini
-	zip -r build_gh3.zip build/*
+	zip -r build_gh3.zip build/32/* -j
 
 32bit: build/32/xinput1_3.dll build/32/xinput1_4.dll build/32/xinput9_1_0.dll
 
