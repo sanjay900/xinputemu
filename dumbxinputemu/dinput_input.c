@@ -38,7 +38,8 @@ typedef enum
     ps5,
     santroller,
     xbox360,
-    santroller_2
+    santroller_2,
+    linux_sdl
 } console_type_t;
 #define DIRECTINPUT_VERSION 0x0800
 #define DEBUG
@@ -83,6 +84,7 @@ struct CapsFlags
 {
     BOOL wireless, jedi, pov, windows, macos, sdl, ps2needschecking, ps3thirdparty, dpad_as_buttons, y_axis_inverted;
     int axes, buttons, subtype;
+    uint16_t vid, pid;
     device_type_t device_type;
     console_type_t console_type;
 };
@@ -193,6 +195,63 @@ static bool OverrideWireless()
     return override_wireless;
 }
 
+static void GetSantrollerSubtypeOverride(int *out_subtype, device_type_t *out_device_type)
+{
+    CHAR Buffer[MAX_PATH];
+    CHAR SubtypeStr[64];
+    GetCurrentDirectoryA(MAX_PATH, Buffer);
+    strcat(Buffer, "\\input_config.ini");
+
+    // Default to Guitar Hero guitar
+    *out_subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+    *out_device_type = gh_guitar;
+
+    GetPrivateProfileStringA("santroller", "subtype", "", SubtypeStr, sizeof(SubtypeStr), Buffer);
+    if (SubtypeStr[0] == '\0')
+    {
+        GetPrivateProfileStringA("overrides", "santroller_subtype", "", SubtypeStr, sizeof(SubtypeStr), Buffer);
+    }
+
+    if (SubtypeStr[0] != '\0')
+    {
+        if (strcasecmp(SubtypeStr, "guitar") == 0 || strcasecmp(SubtypeStr, "gh_guitar") == 0 || strcasecmp(SubtypeStr, "guitar_alternate") == 0)
+        {
+            *out_subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            *out_device_type = gh_guitar;
+        }
+        else if (strcasecmp(SubtypeStr, "rb_guitar") == 0)
+        {
+            *out_subtype = XINPUT_DEVSUBTYPE_GUITAR;
+            *out_device_type = rb_guitar;
+        }
+        else if (strcasecmp(SubtypeStr, "drums") == 0 || strcasecmp(SubtypeStr, "drum") == 0 || strcasecmp(SubtypeStr, "gh_drum") == 0)
+        {
+            *out_subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
+            *out_device_type = gh_drum;
+        }
+        else if (strcasecmp(SubtypeStr, "rb_drum") == 0 || strcasecmp(SubtypeStr, "rb_drums") == 0)
+        {
+            *out_subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
+            *out_device_type = rb_drum;
+        }
+        else if (strcasecmp(SubtypeStr, "gamepad") == 0)
+        {
+            *out_subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
+            *out_device_type = gamepad;
+        }
+        else if (strcasecmp(SubtypeStr, "live_guitar") == 0)
+        {
+            *out_subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            *out_device_type = live_guitar;
+        }
+        else if (strcasecmp(SubtypeStr, "turntable") == 0)
+        {
+            *out_subtype = XINPUT_DEVSUBTYPE_TURNTABLE;
+            *out_device_type = turntable;
+        }
+    }
+}
+
 static bool IsMacos()
 {
     LPCWSTR library = L"Z:\\Library";
@@ -218,30 +277,90 @@ static bool KeyExists(HKEY hKeyRoot, LPCWSTR subKey)
     }
 }
 
-static bool UpdateKey(HKEY hKeyRoot, LPCWSTR subKey, LPCWSTR name, DWORD val)
+static bool IsWine(void)
 {
-    HKEY hKey;
-    LONG result = RegCreateKeyExW(hKeyRoot, subKey, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL);
+    return KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine") || KeyExists(HKEY_CURRENT_USER, L"Software\\Wine");
+}
+
+static bool SDLEnabled(void)
+{
+    DWORD data;
+    DWORD size = sizeof(data);
+    LONG result = RegGetValueW(HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Services\\WineBus", L"Enable SDL", RRF_RT_DWORD, NULL, (LPBYTE)&data, &size);
 
     if (result == ERROR_SUCCESS)
     {
-        DWORD type;
-        DWORD ret;
-        DWORD sz = sizeof(ret);
-        result = RegGetValueW(hKeyRoot, subKey, name, 0, &type, (LPBYTE)&ret, &sz);
-        if (result == ERROR_FILE_NOT_FOUND || ret != 1)
-        {
-            RegSetValueExW(hKey, name, 0, REG_DWORD, (LPBYTE)&val, sizeof(val));
-            RegCloseKey(hKey);
-            return true;
-        }
-        RegCloseKey(hKey);
-        return false;
+        return data != 0;
     }
     else
     {
-        return false;
+        // SDL enabled by default
+        return true;
     }
+}
+
+static bool IsVendorHidRaw(uint16_t vid)
+{
+    if (!IsWine())
+        return true;
+    if (!SDLEnabled())
+        return true;
+
+    wchar_t regKey[64];
+    swprintf(regKey, sizeof(regKey) / sizeof(regKey[0]), L"System\\CurrentControlSet\\Services\\WineBus\\Devices\\%04x", vid);
+    DWORD data = 0;
+    DWORD size = sizeof(data);
+    LONG result = RegGetValueW(HKEY_LOCAL_MACHINE, regKey, L"HidRaw", RRF_RT_DWORD, NULL, (LPBYTE)&data, &size);
+    if (result == ERROR_SUCCESS && data == 1)
+        return true;
+
+    return false;
+}
+
+static void parse_wine_sdl_descriptor(hid_device *device, int *out_axes, int *out_buttons, BOOL *out_pov)
+{
+    *out_axes = 4;
+    *out_pov = TRUE;
+    *out_buttons = 13;
+    uint8_t desc[512];
+    int len = hid_get_report_descriptor(device, desc, sizeof(desc));
+    if (len <= 0) return;
+
+    int axes = 0;
+    int hats = 0;
+    int buttons = 0;
+
+    for (int i = 0; i < len; i++)
+    {
+        if (i + 1 < len && desc[i] == 0x09 && desc[i + 1] == 0x39)
+        {
+            hats++;
+        }
+        if (i + 1 < len && desc[i] == 0x09 && desc[i + 1] >= 0x30 && desc[i + 1] <= 0x38)
+        {
+            axes++;
+        }
+        if (i + 1 < len && desc[i] == 0x05 && desc[i + 1] == 0x09)
+        {
+            for (int j = i + 2; j < len && j < i + 32; j++)
+            {
+                if (desc[j] == 0x29 && j + 1 < len)
+                {
+                    buttons = desc[j + 1];
+                    break;
+                }
+                else if (desc[j] == 0x2a && j + 2 < len)
+                {
+                    buttons = desc[j + 1] | (desc[j + 2] << 8);
+                    break;
+                }
+            }
+        }
+    }
+
+    if (axes > 0) *out_axes = axes;
+    *out_pov = (hats > 0);
+    if (buttons > 0) *out_buttons = buttons;
 }
 
 const char *hid_bus_name(hid_bus_type bus_type)
@@ -347,15 +466,24 @@ static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revis
     caps->dpad_as_buttons = false;
     caps->y_axis_inverted = false;
     caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
+    caps->vid = LOWORD(vidpid);
+    caps->pid = HIWORD(vidpid);
     if (vidpid == MAKELONG(0x1209, 0x2883)) {
-        caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
-        caps->device_type = gamepad;
+        GetSantrollerSubtypeOverride(&caps->subtype, &caps->device_type);
         caps->console_type = santroller_2;
-        if (device) {
+        hid_device *query_dev = device;
+        bool opened_temp = false;
+        if (!query_dev) {
+            query_dev = hid_open(0x1209, 0x2883, NULL);
+            if (query_dev) {
+                opened_temp = true;
+            }
+        }
+        if (query_dev) {
             int written = 0;
             const uint8_t featuresGetCommand[SANTROLLER_DEVICE_FEATURES_SET_REPORT_SIZE] = { SANTROLLER_DEVICE_REPORT_ID_FEATURES, 0 };
             for (int attempt = 0; attempt < 8; ++attempt) {
-                written = hid_write(device, featuresGetCommand, sizeof(featuresGetCommand));
+                written = hid_write(query_dev, featuresGetCommand, sizeof(featuresGetCommand));
                 if (written == sizeof(featuresGetCommand)) {
                     break;
                 }
@@ -365,7 +493,7 @@ static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revis
                 uint8_t data[SANTROLLER_DEVICE_FEATURES_GET_REPORT_SIZE];
                 for (int i = 0; i < 100; ++i) {
                     Sleep(1);
-                    int read = hid_read_timeout(device, data, sizeof(data), 1);
+                    int read = hid_read_timeout(query_dev, data, sizeof(data), 1);
                     if (read < 0) {
                         break;
                     }
@@ -468,6 +596,9 @@ static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revis
                         break;
                     }
                 }
+            }
+            if (opened_temp) {
+                hid_close(query_dev);
             }
         }
     }
@@ -762,6 +893,14 @@ static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revis
             break;
         }
     }
+
+    if (device && !IsVendorHidRaw(LOWORD(vidpid)))
+    {
+        caps->console_type = linux_sdl;
+        parse_wine_sdl_descriptor(device, &caps->axes, &caps->buttons, &caps->pov);
+        TRACE("Configured device %08lx as linux_sdl (axes: %d, buttons: %d, hat: %d)\n",
+              vidpid, caps->axes, caps->buttons, caps->pov);
+    }
 }
 
 void print_device(struct hid_device_info *cur_dev)
@@ -850,31 +989,27 @@ void print_devices_with_descriptor(struct hid_device_info *cur_dev)
             printf("found xinput, skipping\n");
             continue;
         }
+        bool already_proxied = false;
+        for (int i = 0; i < dinput.mapped; i++)
+        {
+            if (controllers[i].connected && controllers[i].xinput_index != -1 &&
+                controllers[i].caps.vid == cur_dev->vendor_id && controllers[i].caps.pid == cur_dev->product_id)
+            {
+                already_proxied = true;
+                break;
+            }
+        }
+        if (already_proxied)
+        {
+            printf("found device %04hx:%04hx already proxied as xinput, skipping\n", cur_dev->vendor_id, cur_dev->product_id);
+            continue;
+        }
         if (!(cur_dev->usage == HID_USAGE_GENERIC_JOYSTICK || cur_dev->usage == HID_USAGE_GENERIC_GAMEPAD) || cur_dev->usage_page != HID_USAGE_PAGE_GENERIC)
         {
             continue;
         }
         print_device(cur_dev);
     }
-}
-
-static bool SDLEnabled()
-{
-    uint32_t data;
-    size_t size = sizeof(data);
-    HKEY hKey;
-    LONG result = RegGetValueW(HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Services\\WineBus", L"Enable SDL", RRF_RT_DWORD, NULL, (LPDWORD)&data, (LPDWORD)&size);
-
-    if (result == ERROR_SUCCESS)
-    {
-        return data;
-    }
-    else
-    {
-        // SDL enabled by default
-        return true;
-    }
-    return false;
 }
 
 static BOOL dinput_set_range(const LPDIRECTINPUTDEVICE8A device)
@@ -1810,6 +1945,220 @@ static void dinput_update(int index)
             }
             }
         }
+        if (controllers[index].caps.console_type == linux_sdl)
+        {
+            if (size >= 1 + caps.axes * 2)
+            {
+                int16_t axis0 = *(int16_t *)(data + 1);
+                int16_t axis1 = (caps.axes > 1) ? *(int16_t *)(data + 3) : 0;
+                int16_t axis2 = (caps.axes > 2) ? *(int16_t *)(data + 5) : 0;
+                int16_t axis3 = (caps.axes > 3) ? *(int16_t *)(data + 7) : 0;
+
+                bool up = false;
+                bool down = false;
+                bool left = false;
+                bool right = false;
+
+                int hat_offset = 1 + caps.axes * 2;
+                if (caps.pov && size > hat_offset)
+                {
+                    uint8_t hat_val = data[hat_offset] & 0x0F;
+                    up = (hat_val == 1 || hat_val == 2 || hat_val == 8);
+                    right = (hat_val == 2 || hat_val == 3 || hat_val == 4);
+                    down = (hat_val == 4 || hat_val == 5 || hat_val == 6);
+                    left = (hat_val == 6 || hat_val == 7 || hat_val == 8);
+                }
+
+                int button_offset = hat_offset + (caps.pov ? 1 : 0);
+                uint16_t btn_mask = 0;
+                if (size > button_offset)
+                {
+                    btn_mask = data[button_offset];
+                    if (size > button_offset + 1)
+                    {
+                        btn_mask |= (data[button_offset + 1] << 8);
+                    }
+                }
+
+                switch (controllers[index].caps.device_type)
+                {
+                case gh_guitar:
+                {
+                    if (btn_mask & (1 << 0))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_A; // Green
+                    if (btn_mask & (1 << 1))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_B; // Red
+                    if (btn_mask & (1 << 2))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_Y; // Yellow
+                    if (btn_mask & (1 << 3))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_X; // Blue
+                    if (btn_mask & (1 << 4))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER; // Orange
+
+                    if (up)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                    if (down)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                    if (left)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                    if (right)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+
+                    if (btn_mask & (1 << 9))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                    if (btn_mask & (1 << 8))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+
+                    gamepad_state.sThumbRX = axis2;
+                    gamepad_state.sThumbRY = axis3;
+                    gamepad_state.sThumbLX = axis0;
+                    gamepad_state.sThumbLY = axis1;
+                    break;
+                }
+                case rb_guitar:
+                {
+                    if (btn_mask & (1 << 0))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_A; // Green
+                    if (btn_mask & (1 << 1))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_B; // Red
+                    if (btn_mask & (1 << 2))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_Y; // Yellow
+                    if (btn_mask & (1 << 3))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_X; // Blue
+                    if (btn_mask & (1 << 4))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER; // Orange
+                    if ((btn_mask & (1 << 6)) || (btn_mask & (1 << 10)) || (btn_mask & (1 << 11)))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB; // Solo frets
+
+                    if (up)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                    if (down)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                    if (left)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                    if (right)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+
+                    if (btn_mask & (1 << 9))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                    if (btn_mask & (1 << 8))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+
+                    gamepad_state.sThumbRX = axis2;
+                    gamepad_state.sThumbRY = ((btn_mask & (1 << 5)) || axis3 > 16384) ? 32767 : 0;
+                    gamepad_state.sThumbLX = axis0;
+                    gamepad_state.sThumbLY = axis1;
+                    break;
+                }
+                case live_guitar:
+                {
+                    if (btn_mask & (1 << 0))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_A; // Black 1
+                    if (btn_mask & (1 << 1))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_B; // Black 2
+                    if (btn_mask & (1 << 2))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_Y; // Black 3
+                    if (btn_mask & (1 << 3))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_X; // White 1
+                    if (btn_mask & (1 << 4))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER; // White 2
+                    if (btn_mask & (1 << 5))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER; // White 3
+                    if ((btn_mask & (1 << 6)) || (btn_mask & (1 << 10)) || (btn_mask & (1 << 11)))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+
+                    if (up)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                    if (down)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                    if (left)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                    if (right)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+
+                    if (btn_mask & (1 << 9))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                    if (btn_mask & (1 << 8))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+
+                    gamepad_state.sThumbRX = axis2;
+                    gamepad_state.sThumbRY = axis3;
+                    break;
+                }
+                case gh_drum:
+                case rb_drum:
+                {
+                    if (btn_mask & (1 << 0))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_A; // Green
+                    if (btn_mask & (1 << 1))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_B; // Red
+                    if (btn_mask & (1 << 2))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_Y; // Yellow
+                    if (btn_mask & (1 << 3))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_X; // Blue
+                    if (btn_mask & (1 << 4))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER; // Kick
+                    if ((btn_mask & (1 << 5)) || (btn_mask & (1 << 6)))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+                    if ((btn_mask & (1 << 7)) || (btn_mask & (1 << 10)) || (btn_mask & (1 << 11)))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+
+                    if (up)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                    if (down)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                    if (left)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                    if (right)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+
+                    if (btn_mask & (1 << 9))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                    if (btn_mask & (1 << 8))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+                    break;
+                }
+                default:
+                {
+                    if (btn_mask & (1 << 0))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_A;
+                    if (btn_mask & (1 << 1))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_B;
+                    if (btn_mask & (1 << 2))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_Y;
+                    if (btn_mask & (1 << 3))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_X;
+                    if (btn_mask & (1 << 4))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+                    if (btn_mask & (1 << 5))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+                    if (btn_mask & (1 << 8))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
+                    if (btn_mask & (1 << 9))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                    if ((btn_mask & (1 << 10)) || (btn_mask & (1 << 11)))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+                    if ((btn_mask & (1 << 11)) || (btn_mask & (1 << 12)))
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_THUMB;
+
+                    if (up)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                    if (down)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                    if (left)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                    if (right)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+
+                    gamepad_state.sThumbLX = axis0;
+                    gamepad_state.sThumbLY = ~axis1;
+                    gamepad_state.sThumbRX = axis2;
+                    gamepad_state.sThumbRY = (caps.axes > 3) ? ~axis3 : 0;
+                    break;
+                }
+                }
+            }
+        }
     }
     else
         memset(&gamepad_state, 0, sizeof(XINPUT_GAMEPAD));
@@ -1871,36 +2220,6 @@ static void dinput_start(void)
 
         setbuf(stdout, NULL);
     }
-    // Enable hidraw for direct access to controllers on linux
-    if (KeyExists(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Wine") || KeyExists(HKEY_CURRENT_USER, L"Software\\Wine"))
-    {
-        // if any of them are updated, pop up a msgbox saying that the prefix needs to be restarted
-        static const uint16_t vendors[] = {
-            0x12ba,
-            0x1209,
-            0x1bad,
-            0x3651,
-            0x289b,
-            0x0e6f,
-            0x0738,
-            0x1430,
-            0x1122};
-        wchar_t regKey[64];
-        bool updated = false;
-        for (int i = 0; i < sizeof(vendors) / sizeof(vendors[0]); i++)
-        {
-            swprintf(regKey, sizeof(regKey), L"System\\CurrentControlSet\\Services\\WineBus\\Devices\\%04x", vendors[i]);
-            updated |= UpdateKey(HKEY_LOCAL_MACHINE, regKey, L"HidRaw", 1);
-        }
-        if (updated)
-        {
-            int msgboxID = MessageBoxW(
-                NULL,
-                (LPCWSTR)L"Device entries changed, please restart your wine prefix",
-                (LPCWSTR)L"Warning",
-                MB_ICONWARNING | MB_OK);
-        }
-    }
 
     override_rb = OverrideRbWithGh();
     override_wireless = OverrideWireless();
@@ -1942,8 +2261,9 @@ static void dinput_start(void)
 
         // If the function address is valid, call the function.
 
-        if (NULL != XInputGetState && NULL != XInputGetCapabilitiesEx && hasEx)
+        if (NULL != ProcXInputGetState && NULL != ProcXInputGetCapabilitiesEx && hasEx)
         {
+            TRACE("found procs ex\r\n");
             for (int i = 0; i < 4; i++)
             {
                 XINPUT_CAPABILITIES_EX caps2;
@@ -1974,7 +2294,7 @@ static void dinput_start(void)
                 }
             }
         }
-        else if (NULL != XInputGetState && NULL != XInputGetCapabilities)
+        else if (NULL != ProcXInputGetState && NULL != ProcXInputGetCapabilities)
         {
             TRACE("found procs\r\n");
             for (int i = 0; i < 4; i++)
