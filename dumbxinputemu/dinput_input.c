@@ -37,7 +37,8 @@ typedef enum
     ps4,
     ps5,
     santroller,
-    xbox360
+    xbox360,
+    santroller_2
 } console_type_t;
 #define DIRECTINPUT_VERSION 0x0800
 #define DEBUG
@@ -80,7 +81,7 @@ typedef enum
 static const uint8_t dpad_bindings_reverse[] = {UP, UP | RIGHT, RIGHT, DOWN | RIGHT, DOWN, DOWN | LEFT, LEFT, UP | LEFT};
 struct CapsFlags
 {
-    BOOL wireless, jedi, pov, windows, macos, sdl, ps2needschecking, ps3thirdparty;
+    BOOL wireless, jedi, pov, windows, macos, sdl, ps2needschecking, ps3thirdparty, dpad_as_buttons, y_axis_inverted;
     int axes, buttons, subtype;
     device_type_t device_type;
     console_type_t console_type;
@@ -261,7 +262,18 @@ const char *hid_bus_name(hid_bus_type bus_type)
     return HidBusTypeName[bus_type];
 }
 
-static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revision)
+#define SANTROLLER_DEVICE_REPORT_ID_FEATURES        0x10
+#define SANTROLLER_DEVICE_FEATURES_SET_REPORT_SIZE  2
+#define SANTROLLER_DEVICE_FEATURES_GET_REPORT_SIZE  3
+
+#define SANTROLLER_DEVICE_CAPABILITY_STANDARD_PLAYER_LEDS 0x01
+#define SANTROLLER_DEVICE_CAPABILITY_JOYSTICK_RGB         0x02
+#define SANTROLLER_DEVICE_CAPABILITY_INSTRUMENT_LED       0x04
+#define SANTROLLER_DEVICE_CAPABILITY_RUMBLE               0x08
+#define SANTROLLER_DEVICE_CAPABILITY_DPAD_AS_BUTTONS      0x10
+#define SANTROLLER_DEVICE_CAPABILITY_Y_AXIS_INVERTED      0x20
+
+static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revision, hid_device *device)
 {
     int i;
     HRESULT hr;
@@ -332,14 +344,136 @@ static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revis
     };
     caps->ps2needschecking = false;
     caps->ps3thirdparty = true;
+    caps->dpad_as_buttons = false;
+    caps->y_axis_inverted = false;
     caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
+    if (vidpid == MAKELONG(0x1209, 0x2883)) {
+        caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
+        caps->device_type = gamepad;
+        caps->console_type = santroller_2;
+        if (device) {
+            int written = 0;
+            const uint8_t featuresGetCommand[SANTROLLER_DEVICE_FEATURES_SET_REPORT_SIZE] = { SANTROLLER_DEVICE_REPORT_ID_FEATURES, 0 };
+            for (int attempt = 0; attempt < 8; ++attempt) {
+                written = hid_write(device, featuresGetCommand, sizeof(featuresGetCommand));
+                if (written == sizeof(featuresGetCommand)) {
+                    break;
+                }
+            }
 
+            if (written >= 2) {
+                uint8_t data[SANTROLLER_DEVICE_FEATURES_GET_REPORT_SIZE];
+                for (int i = 0; i < 100; ++i) {
+                    Sleep(1);
+                    int read = hid_read_timeout(device, data, sizeof(data), 1);
+                    if (read < 0) {
+                        break;
+                    }
+                    if (read == 0) {
+                        continue;
+                    }
+                    if (read == SANTROLLER_DEVICE_FEATURES_GET_REPORT_SIZE && data[0] == SANTROLLER_DEVICE_REPORT_ID_FEATURES) {
+                        uint8_t sub_type = data[1];
+                        uint8_t capabilities = data[2];
+
+                        caps->dpad_as_buttons = (capabilities & SANTROLLER_DEVICE_CAPABILITY_DPAD_AS_BUTTONS) != 0;
+                        caps->y_axis_inverted = (sub_type == GAMEPAD) && ((capabilities & SANTROLLER_DEVICE_CAPABILITY_Y_AXIS_INVERTED) != 0);
+
+                        switch (sub_type) {
+                        case STAGE_KIT:
+                            caps->subtype = XINPUT_DEVSUBTYPE_STAGE_KIT;
+                            caps->device_type = stage_kit;
+                            TRACE("Santroller 2 stage kit detected!\n");
+                            break;
+                        case GAMEPAD:
+                            caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
+                            caps->device_type = gamepad;
+                            TRACE("Santroller 2 gamepad detected!\n");
+                            break;
+                        case DANCE_PAD:
+                            caps->subtype = XINPUT_DEVSUBTYPE_DANCE_PAD;
+                            caps->device_type = gamepad;
+                            TRACE("Santroller 2 dance pad detected!\n");
+                            break;
+                        case GUITAR_HERO_GUITAR:
+                        case GUITAR_HERO_GUITAR_WT:
+                        case FORTNITE_GUITAR:
+                        case FORTNITE_GUITAR_STRUM:
+                            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+                            caps->device_type = gh_guitar;
+                            TRACE("Santroller 2 gh guitar detected!\n");
+                            break;
+                        case ROCK_BAND_GUITAR:
+                            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR;
+                            caps->device_type = rb_guitar;
+                            TRACE("Santroller 2 rb guitar detected!\n");
+                            if (override_rb)
+                            {
+                                printf("Overriding RB guitar subtype with GH guitar subtype\n");
+                                caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+                            }
+                            break;
+                        case GUITAR_HERO_DRUMS:
+                        case FORTNITE_DRUMS:
+                            caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
+                            caps->device_type = gh_drum;
+                            TRACE("Santroller 2 gh drum detected!\n");
+                            break;
+                        case ROCK_BAND_DRUMS:
+                            caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
+                            caps->device_type = rb_drum;
+                            TRACE("Santroller 2 rb drum detected!\n");
+                            break;
+                        case LIVE_GUITAR:
+                            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+                            caps->device_type = live_guitar;
+                            TRACE("Santroller 2 live guitar detected!\n");
+                            break;
+                        case DJ_HERO_TURNTABLE:
+                            caps->subtype = XINPUT_DEVSUBTYPE_TURNTABLE;
+                            caps->device_type = turntable;
+                            TRACE("Santroller 2 turntable detected!\n");
+                            break;
+                        case ROCK_BAND_PRO_KEYS:
+                            caps->subtype = XINPUT_DEVSUBTYPE_PRO_KEYS;
+                            caps->device_type = pro_keys;
+                            TRACE("Santroller 2 pro keys detected!\n");
+                            break;
+                        case ROCK_BAND_PRO_GUITAR_MUSTANG:
+                            caps->subtype = XINPUT_DEVSUBTYPE_PRO_GUITAR;
+                            caps->device_type = pro_guitar_mustang;
+                            TRACE("Santroller 2 pro guitar mustang detected!\n");
+                            break;
+                        case ROCK_BAND_PRO_GUITAR_SQUIRE:
+                            caps->subtype = XINPUT_DEVSUBTYPE_PRO_GUITAR;
+                            caps->device_type = pro_guitar_squire;
+                            TRACE("Santroller 2 pro guitar squire detected!\n");
+                            break;
+                        case TAIKO:
+                            caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
+                            caps->device_type = gh_drum;
+                            TRACE("Santroller 2 taiko detected!\n");
+                            break;
+                        case ARCADE:
+                            caps->subtype = XINPUT_DEVSUBTYPE_ARCADE_PAD;
+                            caps->device_type = gamepad;
+                            TRACE("Santroller 2 arcade detected!\n");
+                            break;
+                        default:
+                            caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
+                            caps->device_type = gamepad;
+                            TRACE("Santroller 2 subtype %d detected!\n", sub_type);
+                            break;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
     if (vidpid == MAKELONG(0x1209, 0x2882))
     {
         uint8_t type = revision >> 8;
-        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-        caps->device_type = gh_guitar;
-        caps->console_type = santroller;
         switch (revision >> 8)
         {
         case STAGE_KIT:
@@ -648,7 +782,7 @@ void print_device(struct hid_device_info *cur_dev)
     controllers[dinput.mapped].device = hid_open_path(cur_dev->path);
     hid_device *device = controllers[dinput.mapped].device;
     hid_set_nonblocking(device, 1);
-    dinput_fill_caps(&controllers[dinput.mapped].caps, MAKELONG(cur_dev->vendor_id, cur_dev->product_id), cur_dev->release_number);
+    dinput_fill_caps(&controllers[dinput.mapped].caps, MAKELONG(cur_dev->vendor_id, cur_dev->product_id), cur_dev->release_number, device);
 
     if (controllers[dinput.mapped].caps.console_type == raphnet_wii || controllers[dinput.mapped].caps.console_type == raphnet_ps2)
     {
@@ -824,6 +958,34 @@ static void dinput_update(int index)
         if (!size)
         {
             return;
+        }
+        if (controllers[index].caps.console_type == santroller_2)
+        {
+            // Santroller 2 reports are based on xinput but use a HID style hat unless dpad_as_buttons is set
+            XINPUT_GAMEPAD* xinput_gamepad = (XINPUT_GAMEPAD*)(&data[2]);
+            memcpy(&gamepad_state, xinput_gamepad, sizeof(XINPUT_GAMEPAD));
+            if (!controllers[index].caps.dpad_as_buttons)
+            {
+                uint8_t dpad = (data[2] & 0xf) >= 0x08 ? 0 : dpad_bindings_reverse[(data[2] & 0xf)];
+                bool up = dpad & UP;
+                bool left = dpad & LEFT;
+                bool down = dpad & DOWN;
+                bool right = dpad & RIGHT;
+                gamepad_state.wButtons &= ~(XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT);
+                if (up)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                if (down)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                if (left)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+                if (right)
+                    gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+            }
+            if (controllers[index].caps.device_type == gamepad && controllers[index].caps.y_axis_inverted)
+            {
+                gamepad_state.sThumbLY = ~gamepad_state.sThumbLY;
+                gamepad_state.sThumbRY = ~gamepad_state.sThumbRY;
+            }
         }
         if (controllers[index].caps.console_type == ps3)
         {
@@ -1792,7 +1954,7 @@ static void dinput_start(void)
                     controllers[dinput.mapped].xinput_index = i;
                     controllers[dinput.mapped].connected = TRUE;
                     controllers[dinput.mapped].caps.subtype = caps2.Capabilities.SubType;
-                    dinput_fill_caps(&controllers[dinput.mapped].caps, MAKELONG(caps2.VendorId, caps2.ProductId), caps2.VersionNumber);
+                    dinput_fill_caps(&controllers[dinput.mapped].caps, MAKELONG(caps2.VendorId, caps2.ProductId), caps2.VersionNumber, NULL);
                     if (caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GUITAR && override_rb)
                     {
                         TRACE("found RB guitar, proxying as GH guitar\r\n");
