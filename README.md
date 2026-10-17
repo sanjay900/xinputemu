@@ -10,6 +10,7 @@ Supported instruments:
 - PS3 RB / GH (requires disabling SDL for wine, just works on windows)
 - PS4 / PS5 RB (requires clipper on windows, requires [hid-sony](https://github.com/Rosalie241/hid-sony) on linux)
 - XInput guitars (works on windows and linux)
+- Xbox One Guitars
 - CRKD Guitars (use PC mode 8 / legacy pc mode)
 - Raphnet wii adapters (requires disabling SDL for wine, just works on windows)
 - Raphnet PSX adapters (untested, requires disabling SDL for wine, should just work on windows)
