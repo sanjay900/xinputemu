@@ -39,11 +39,13 @@ typedef enum
     santroller,
     xbox360,
     santroller_2,
-    linux_sdl
+    linux_sdl,
+    xbox_one
 } console_type_t;
 #define DIRECTINPUT_VERSION 0x0800
 #define DEBUG
 #include "dinput.h"
+#include "gip_reports.h"
 #ifndef TRACE
 // Available only in Wine
 #define TRACE(format, ...)                                    \
@@ -99,6 +101,8 @@ static struct ControllerMap
     XINPUT_VIBRATION vibration;
     BOOL vibration_dirty;
     time_t last_poke;
+    uint64_t gip_device_id;
+    uint8_t gip_last_sequence;
 } controllers[XUSER_MAX_COUNT];
 
 static struct
@@ -1989,9 +1993,9 @@ static void dinput_update(int index)
                     if (btn_mask & (1 << 1))
                         gamepad_state.wButtons |= XINPUT_GAMEPAD_B; // Red
                     if (btn_mask & (1 << 2))
-                        gamepad_state.wButtons |= XINPUT_GAMEPAD_Y; // Yellow
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_Y; // Yellow (Triangle on PS3 GH)
                     if (btn_mask & (1 << 3))
-                        gamepad_state.wButtons |= XINPUT_GAMEPAD_X; // Blue
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_X; // Blue (Square on PS3 GH)
                     if (btn_mask & (1 << 4))
                         gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER; // Orange
 
@@ -2010,7 +2014,15 @@ static void dinput_update(int index)
                         gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
 
                     gamepad_state.sThumbRX = axis2;
-                    gamepad_state.sThumbRY = axis3;
+                    if (axis3 < 0)
+                    {
+                        int32_t val = -((int32_t)axis3) * 3;
+                        gamepad_state.sThumbRY = (val > 32767) ? 32767 : (int16_t)val;
+                    }
+                    else
+                    {
+                        gamepad_state.sThumbRY = 0;
+                    }
                     gamepad_state.sThumbLX = axis0;
                     gamepad_state.sThumbLY = axis1;
                     break;
@@ -2022,9 +2034,9 @@ static void dinput_update(int index)
                     if (btn_mask & (1 << 1))
                         gamepad_state.wButtons |= XINPUT_GAMEPAD_B; // Red
                     if (btn_mask & (1 << 2))
-                        gamepad_state.wButtons |= XINPUT_GAMEPAD_Y; // Yellow
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_X; // Blue (Triangle)
                     if (btn_mask & (1 << 3))
-                        gamepad_state.wButtons |= XINPUT_GAMEPAD_X; // Blue
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_Y; // Yellow (Square)
                     if (btn_mask & (1 << 4))
                         gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER; // Orange
                     if ((btn_mask & (1 << 6)) || (btn_mask & (1 << 10)) || (btn_mask & (1 << 11)))
@@ -2045,7 +2057,12 @@ static void dinput_update(int index)
                         gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
 
                     gamepad_state.sThumbRX = axis2;
-                    gamepad_state.sThumbRY = ((btn_mask & (1 << 5)) || axis3 > 16384) ? 32767 : 0;
+                    if (btn_mask & (1 << 5))
+                        gamepad_state.sThumbRY = 32767;
+                    else if (caps.axes > 3 && axis3 != 0)
+                        gamepad_state.sThumbRY = axis3;
+                    else
+                        gamepad_state.sThumbRY = 0;
                     gamepad_state.sThumbLX = axis0;
                     gamepad_state.sThumbLY = axis1;
                     break;
@@ -2176,13 +2193,346 @@ static unsigned __stdcall dinput_update_all(void *argument)
     {
         for (int index = 0; index < XUSER_MAX_COUNT; index++)
         {
-            if (controllers[index].connected && controllers[index].xinput_index == -1)
+            if (controllers[index].connected && controllers[index].xinput_index == -1 &&
+                controllers[index].caps.console_type != xbox_one)
             {
                 dinput_update(index);
             }
         }
     }
 }
+
+/* ===================== Xbox One (GIP) instruments ========================= */
+// Windows doesn't expose Xbox One instruments through XInput, so read them straight from the GIP driver.
+// Input only arrives while this process is focused, which is fine as we live inside the game.
+
+static int gip_find_controller(uint64_t device_id)
+{
+    for (int i = 0; i < dinput.mapped; i++)
+    {
+        if (controllers[i].caps.console_type == xbox_one && controllers[i].gip_device_id == device_id)
+            return i;
+    }
+    return -1;
+}
+
+static bool gip_proxied_by_xinput(uint16_t vid, uint16_t pid)
+{
+    for (int i = 0; i < dinput.mapped; i++)
+    {
+        if (controllers[i].xinput_index != -1 && controllers[i].caps.vid == vid && controllers[i].caps.pid == pid)
+            return true;
+    }
+    return false;
+}
+
+static void gip_set_state(int index, const XINPUT_GAMEPAD *gamepad_state)
+{
+    if (memcmp(&controllers[index].state.Gamepad, gamepad_state, sizeof(XINPUT_GAMEPAD)))
+    {
+        controllers[index].state.Gamepad = *gamepad_state;
+        controllers[index].state.dwPacketNumber++;
+    }
+}
+
+static device_type_t gip_type_from_vidpid(uint16_t vid, uint16_t pid)
+{
+    switch (MAKELONG(vid, pid))
+    {
+    case MAKELONG(0x0738, 0x4161): // MadCatz Stratocaster
+    case MAKELONG(0x0E6F, 0x0170): // PDP Jaguar
+    case MAKELONG(0x0E6F, 0x0248): // PDP Riffmaster
+    case MAKELONG(0x3651, 0x4161): // CRKD
+        return rb_guitar;
+    case MAKELONG(0x0738, 0x4262): // MadCatz drums
+    case MAKELONG(0x0E6F, 0x0171): // PDP drums
+        return rb_drum;
+    }
+    // Anything else (gamepads etc) is left to XInput
+    return gamepad;
+}
+
+static device_type_t gip_type_from_descriptor(const uint8_t *data, uint32_t length)
+{
+    if (length < sizeof(GipDescriptorHeader_t))
+        return gamepad;
+    const GipDescriptorHeader_t *header = (const GipDescriptorHeader_t *)data;
+    const uint8_t *base = data + offsetof(GipDescriptorHeader_t, offsetExternalCommands);
+    uint32_t base_length = length - offsetof(GipDescriptorHeader_t, offsetExternalCommands);
+    uint16_t offset = header->offsetInterfaceGuids;
+    if (!offset || offset >= base_length)
+        return gamepad;
+    uint8_t count = base[offset];
+    for (int i = 0; i < count && offset + 1 + (i + 1) * sizeof(GUID) <= base_length; i++)
+    {
+        const GUID *guid = (const GUID *)(base + offset + 1 + i * sizeof(GUID));
+        if (IsEqualGUID(guid, &GIP_GUID_GUITAR_MADCATZ) || IsEqualGUID(guid, &GIP_GUID_GUITAR_PDP))
+            return rb_guitar;
+        if (IsEqualGUID(guid, &GIP_GUID_DRUMS_MADCATZ) || IsEqualGUID(guid, &GIP_GUID_DRUMS_PDP))
+            return rb_drum;
+    }
+    return gamepad;
+}
+
+static void gip_add_controller(uint64_t device_id, uint16_t vid, uint16_t pid, device_type_t type)
+{
+    int index = gip_find_controller(device_id);
+    if (index == -1)
+    {
+        // Reuse the slot of a disconnected GIP device so reconnecting keeps the player index
+        for (int i = 0; i < dinput.mapped; i++)
+        {
+            if (controllers[i].caps.console_type == xbox_one && !controllers[i].connected)
+            {
+                index = i;
+                break;
+            }
+        }
+    }
+    if (index == -1)
+    {
+        if (dinput.mapped == XUSER_MAX_COUNT)
+        {
+            TRACE("no free slot for xbox one device %04x:%04x\n", vid, pid);
+            return;
+        }
+        index = dinput.mapped++;
+    }
+    TRACE("xbox one %s %04x:%04x in slot %d\n", type == rb_drum ? "drums" : "guitar", vid, pid, index);
+    struct ControllerMap *controller = &controllers[index];
+    memset(&controller->caps, 0, sizeof(controller->caps));
+    controller->caps.vid = vid;
+    controller->caps.pid = pid;
+    controller->caps.pov = TRUE;
+    controller->caps.device_type = type;
+    controller->caps.console_type = xbox_one;
+    if (type == rb_drum)
+        controller->caps.subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
+    else
+        controller->caps.subtype = override_rb ? XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE : XINPUT_DEVSUBTYPE_GUITAR;
+    controller->xinput_index = -1;
+    controller->device = NULL;
+    controller->gip_device_id = device_id;
+    // Sequence numbers wrap from 255 to 1, so 0 never matches the first report
+    controller->gip_last_sequence = 0;
+    memset(&controller->state, 0, sizeof(controller->state));
+    controller->connected = TRUE;
+}
+
+static void gip_disconnect(int index)
+{
+    XINPUT_GAMEPAD gamepad_state = {0};
+    TRACE("xbox one device in slot %d disconnected\n", index);
+    gip_set_state(index, &gamepad_state);
+    controllers[index].connected = FALSE;
+}
+
+static void gip_map_common_buttons(uint16_t buttons, XINPUT_GAMEPAD *gamepad_state)
+{
+    if (buttons & GIP_BUTTON_MENU)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_START;
+    if (buttons & GIP_BUTTON_VIEW)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_BACK;
+    if (buttons & GIP_BUTTON_DPAD_UP)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+    if (buttons & GIP_BUTTON_DPAD_DOWN)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+    if (buttons & GIP_BUTTON_DPAD_LEFT)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+    if (buttons & GIP_BUTTON_DPAD_RIGHT)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+}
+
+static void gip_map_guitar(const uint8_t *data, uint32_t length, XINPUT_GAMEPAD *gamepad_state)
+{
+    if (length < sizeof(GipGuitarInput_t))
+        return;
+    const GipGuitarInput_t *report = (const GipGuitarInput_t *)data;
+    gip_map_common_buttons(report->buttons, gamepad_state);
+
+    // The fret flags in the button bitmask overlap with the Riffmaster joystick click, so use the fret bitmasks
+    uint8_t frets = report->upperFrets | report->lowerFrets;
+    if (frets & GIP_FRET_GREEN)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_A;
+    if (frets & GIP_FRET_RED)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_B;
+    if (frets & GIP_FRET_YELLOW)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_Y;
+    if (frets & GIP_FRET_BLUE)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_X;
+    if (frets & GIP_FRET_ORANGE)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+    if (report->lowerFrets)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+
+    gamepad_state->sThumbRX = (report->whammy << 8) - 32767;
+    gamepad_state->sThumbRY = report->tilt << 7;
+    uint8_t pickup = report->pickup >> 4;
+    if (pickup < sizeof(pickup_vals))
+        gamepad_state->bLeftTrigger = pickup_vals[pickup];
+}
+
+static void gip_map_drums(const uint8_t *data, uint32_t length, XINPUT_GAMEPAD *gamepad_state)
+{
+    if (length < sizeof(GipDrumInput_t))
+        return;
+    const GipDrumInput_t *report = (const GipDrumInput_t *)data;
+    gip_map_common_buttons(report->buttons, gamepad_state);
+
+    // Face buttons are still used for menus. PDP kits only set X/Y for blue/yellow pads,
+    // so pad colours come from the velocities instead
+    if (report->buttons & GIP_BUTTON_A)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_A;
+    if (report->buttons & GIP_BUTTON_B)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_B;
+    if (report->buttons & GIP_BUTTON_X)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_X;
+    if (report->buttons & GIP_BUTTON_Y)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_Y;
+    if (report->buttons & GIP_DRUM_KICK1)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+    if (report->buttons & GIP_DRUM_KICK2)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+
+    if (report->redYellowPad >> 4)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_RIGHT_THUMB;
+    if (report->redYellowPad & 0x0F)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_Y | XINPUT_GAMEPAD_RIGHT_THUMB;
+    if (report->blueGreenPad >> 4)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_X | XINPUT_GAMEPAD_RIGHT_THUMB;
+    if (report->blueGreenPad & 0x0F)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_RIGHT_THUMB;
+    if (report->yellowBlueCymbal >> 4)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_Y | XINPUT_GAMEPAD_RIGHT_SHOULDER | XINPUT_GAMEPAD_DPAD_UP;
+    if (report->yellowBlueCymbal & 0x0F)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_X | XINPUT_GAMEPAD_RIGHT_SHOULDER | XINPUT_GAMEPAD_DPAD_DOWN;
+    if (report->greenCymbal >> 4)
+        gamepad_state->wButtons |= XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_RIGHT_SHOULDER;
+}
+
+static void gip_handle_message(const uint8_t *buf, DWORD size)
+{
+    if (size < sizeof(GipHeader_t))
+        return;
+    const GipHeader_t *header = (const GipHeader_t *)buf;
+    const uint8_t *data = buf + sizeof(GipHeader_t);
+    uint32_t length = header->length;
+    if (length > size - sizeof(GipHeader_t))
+        length = size - sizeof(GipHeader_t);
+    bool system = header->flags & 0x20;
+    int index = gip_find_controller(header->deviceId);
+
+    if (system && header->commandId == GIP_CMD_ARRIVAL && length >= sizeof(GipArrival_t))
+    {
+        const GipArrival_t *arrival = (const GipArrival_t *)data;
+        TRACE("xbox one device arrived: %04x:%04x\n", arrival->vendorId, arrival->productId);
+        device_type_t type = gip_type_from_vidpid(arrival->vendorId, arrival->productId);
+        if (type != gamepad && !gip_proxied_by_xinput(arrival->vendorId, arrival->productId))
+            gip_add_controller(header->deviceId, arrival->vendorId, arrival->productId, type);
+    }
+    else if (system && header->commandId == GIP_CMD_DESCRIPTOR && length >= sizeof(GipDescriptorHeader_t))
+    {
+        // Picks up instruments missing from the VID/PID list
+        const GipDescriptorHeader_t *descriptor = (const GipDescriptorHeader_t *)data;
+        if (index != -1 && controllers[index].connected)
+            return;
+        device_type_t type = gip_type_from_descriptor(data, length);
+        if (type != gamepad && !gip_proxied_by_xinput(descriptor->vendorId, descriptor->productId))
+            gip_add_controller(header->deviceId, descriptor->vendorId, descriptor->productId, type);
+    }
+    else if (system && header->commandId == GIP_CMD_STATUS && length >= 1)
+    {
+        if (index != -1 && controllers[index].connected && !(data[0] & GIP_STATUS_CONNECTED))
+            gip_disconnect(index);
+    }
+    else if (system && header->commandId == GIP_CMD_FOCUS && length >= 1)
+    {
+        // Input stops while unfocused, so release everything rather than leaving buttons held
+        if (data[0] == 0)
+        {
+            XINPUT_GAMEPAD gamepad_state = {0};
+            for (int i = 0; i < dinput.mapped; i++)
+            {
+                if (controllers[i].caps.console_type == xbox_one && controllers[i].connected)
+                    gip_set_state(i, &gamepad_state);
+            }
+        }
+    }
+    else if (!system && header->commandId == GIP_CMD_INPUT)
+    {
+        if (index == -1 || !controllers[index].connected)
+            return;
+        // Drums send every report twice
+        if (header->sequence == controllers[index].gip_last_sequence)
+            return;
+        controllers[index].gip_last_sequence = header->sequence;
+        XINPUT_GAMEPAD gamepad_state = {0};
+        if (controllers[index].caps.device_type == rb_drum)
+            gip_map_drums(data, length, &gamepad_state);
+        else
+            gip_map_guitar(data, length, &gamepad_state);
+        gip_set_state(index, &gamepad_state);
+    }
+}
+
+static void gip_reenumerate(HANDLE handle)
+{
+    // Makes the driver resend arrival and descriptor messages for devices that are already connected
+    OVERLAPPED ov = {0};
+    DWORD unused;
+    ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    BOOL ok = DeviceIoControl(handle, GIP_ADD_REENUMERATE_CALLER_CONTEXT, NULL, 0, NULL, 0, NULL, &ov);
+    if (!ok && GetLastError() == ERROR_IO_PENDING)
+        ok = GetOverlappedResult(handle, &ov, &unused, TRUE);
+    if (!ok)
+        TRACE("xbox one re-enumerate failed: %lu\n", GetLastError());
+    CloseHandle(ov.hEvent);
+}
+
+static unsigned __stdcall gip_update_all(void *argument)
+{
+    static uint8_t buf[4096];
+    OVERLAPPED ov = {0};
+    ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    while (1)
+    {
+        HANDLE handle = CreateFileW(L"\\\\.\\XboxGIP", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                    NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+        if (handle == INVALID_HANDLE_VALUE)
+        {
+            // Fails while no Xbox One devices are connected
+            Sleep(2000);
+            continue;
+        }
+        TRACE("opened XboxGIP\n");
+        bool reenumerated = false;
+        while (1)
+        {
+            DWORD size = 0;
+            ResetEvent(ov.hEvent);
+            if (!ReadFile(handle, buf, sizeof(buf), NULL, &ov) && GetLastError() != ERROR_IO_PENDING)
+                break;
+            // Only request re-enumeration once a read is pending, so the resent messages aren't missed
+            if (!reenumerated)
+            {
+                gip_reenumerate(handle);
+                reenumerated = true;
+            }
+            if (!GetOverlappedResult(handle, &ov, &size, TRUE))
+                break;
+            gip_handle_message(buf, size);
+        }
+        TRACE("lost XboxGIP: %lu\n", GetLastError());
+        CloseHandle(handle);
+        for (int i = 0; i < dinput.mapped; i++)
+        {
+            if (controllers[i].caps.console_type == xbox_one && controllers[i].connected)
+                gip_disconnect(i);
+        }
+        Sleep(2000);
+    }
+}
+
 HANDLE hThread;
 unsigned threadID;
 static void dinput_start(void)
@@ -2274,6 +2624,8 @@ static void dinput_start(void)
                     controllers[dinput.mapped].xinput_index = i;
                     controllers[dinput.mapped].connected = TRUE;
                     controllers[dinput.mapped].caps.subtype = caps2.Capabilities.SubType;
+                    controllers[dinput.mapped].caps.vid = caps2.VendorId;
+                    controllers[dinput.mapped].caps.pid = caps2.ProductId;
                     dinput_fill_caps(&controllers[dinput.mapped].caps, MAKELONG(caps2.VendorId, caps2.ProductId), caps2.VersionNumber, NULL);
                     if (caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GUITAR && override_rb)
                     {
@@ -2323,6 +2675,9 @@ static void dinput_start(void)
     hid_free_enumeration(devs);
     hThread = (HANDLE)_beginthreadex(NULL, 0, &dinput_update_all, NULL, 0,
                                      &threadID);
+    // Wine has no GIP driver
+    if (!IsWine())
+        CloseHandle((HANDLE)_beginthreadex(NULL, 0, &gip_update_all, NULL, 0, NULL));
 }
 
 void dumb_Init(DWORD version)
@@ -2333,6 +2688,101 @@ void dumb_Init(DWORD version)
 void dumb_Cleanup()
 {
     // Does nothing as well
+}
+
+static void FixupProxiedXInput(int index, XINPUT_STATE *state)
+{
+    if (!state)
+        return;
+
+    // Check if this is a PlayStation guitar (PS3, PS4, PS5)
+    bool is_ps_guitar = false;
+    if (controllers[index].caps.device_type == gh_guitar || controllers[index].caps.device_type == rb_guitar)
+    {
+        if (controllers[index].caps.console_type == ps3 ||
+            controllers[index].caps.console_type == ps4 ||
+            controllers[index].caps.console_type == ps5 ||
+            controllers[index].caps.vid == 0x12BA ||
+            controllers[index].caps.vid == 0x1BAD ||
+            controllers[index].caps.vid == 0x0E6F ||
+            controllers[index].caps.vid == 0x3651 ||
+            controllers[index].caps.vid == 0x0738)
+        {
+            is_ps_guitar = true;
+        }
+    }
+
+    if (is_ps_guitar)
+    {
+        // 1. Swap Yellow and Blue frets for RB PS3, PS4, and PS5 guitars:
+        // Wine/SDL maps Triangle (North) to XINPUT_GAMEPAD_Y and Square (West) to XINPUT_GAMEPAD_X.
+        // PS3 Guitar Hero guitars already have Triangle as Yellow and Square as Blue in their hardware reports,
+        // so Wine's mapping is already correct for them.
+        // Other PlayStation guitars (Rock Band PS3, PS4, PS5) have Square as Yellow and Triangle as Blue,
+        // so they need X and Y swapped.
+        bool is_ps3_gh = (controllers[index].caps.device_type == gh_guitar &&
+                          (controllers[index].caps.console_type == ps3 ||
+                           (controllers[index].caps.vid == 0x12BA && controllers[index].caps.pid == 0x0100)));
+        if (!is_ps3_gh)
+        {
+            WORD buttons = state->Gamepad.wButtons;
+            bool x = (buttons & XINPUT_GAMEPAD_X) != 0;
+            bool y = (buttons & XINPUT_GAMEPAD_Y) != 0;
+            buttons &= ~(XINPUT_GAMEPAD_X | XINPUT_GAMEPAD_Y);
+            if (x) buttons |= XINPUT_GAMEPAD_Y;
+            if (y) buttons |= XINPUT_GAMEPAD_X;
+            state->Gamepad.wButtons = buttons;
+        }
+
+        // 2. Tilt handling:
+        // - PS3 Rock Band guitars have a digital tilt switch wired to R1 (RIGHT_SHOULDER)
+        if (controllers[index].caps.console_type == ps3 && controllers[index].caps.device_type == rb_guitar)
+        {
+            if (state->Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER)
+            {
+                state->Gamepad.sThumbRY = 32767;
+                state->Gamepad.wButtons &= ~XINPUT_GAMEPAD_RIGHT_SHOULDER;
+            }
+            else
+            {
+                state->Gamepad.sThumbRY = 0;
+            }
+        }
+        // - PS4/PS5 guitars report analog tilt on ABS_RZ (bRightTrigger: 0..255)
+        else if (controllers[index].caps.console_type == ps4 || controllers[index].caps.console_type == ps5)
+        {
+            state->Gamepad.sThumbRY = ((int32_t)state->Gamepad.bRightTrigger * 32767) / 255;
+        }
+        // - PS3 Guitar Hero guitars report analog tilt on ABS_RY (sThumbRY), deflecting negatively when tilted up
+        else if (is_ps3_gh)
+        {
+            if (state->Gamepad.sThumbRY < 0)
+            {
+                int32_t val = -((int32_t)state->Gamepad.sThumbRY) * 3;
+                state->Gamepad.sThumbRY = (val > 32767) ? 32767 : (int16_t)val;
+            }
+            else
+            {
+                state->Gamepad.sThumbRY = 0;
+            }
+        }
+
+        // 3. Whammy for PS4/PS5 guitars:
+        // hid-sony reports whammy on ABS_Z (bLeftTrigger).
+        if ((controllers[index].caps.console_type == ps4 || controllers[index].caps.console_type == ps5) &&
+            state->Gamepad.bLeftTrigger > 0)
+        {
+            state->Gamepad.sThumbRX = ((int32_t)state->Gamepad.bLeftTrigger * 32767) / 255;
+        }
+
+        // 4. Solo frets on PS3 Rock Band guitars (L2 / bLeftTrigger):
+        if (controllers[index].caps.console_type == ps3 &&
+            controllers[index].caps.device_type == rb_guitar &&
+            state->Gamepad.bLeftTrigger > 128)
+        {
+            state->Gamepad.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+        }
+    }
 }
 
 DWORD dumb_XInputGetStateEx(DWORD index, XINPUT_STATE *state, DWORD caller_version)
@@ -2354,10 +2804,22 @@ DWORD dumb_XInputGetStateEx(DWORD index, XINPUT_STATE *state, DWORD caller_versi
 
     if (controllers[index].xinput_index != -1)
     {
-        int ret = (ProcXInputGetStateEx)(controllers[index].xinput_index, state);
+        int ret;
+        if (ProcXInputGetStateEx)
+            ret = (ProcXInputGetStateEx)(controllers[index].xinput_index, state);
+        else if (ProcXInputGetState)
+            ret = (ProcXInputGetState)(controllers[index].xinput_index, state);
+        else
+            ret = ERROR_DEVICE_NOT_CONNECTED;
+
         if (ret == ERROR_DEVICE_NOT_CONNECTED)
         {
             controllers[index].connected = false;
+            return ret;
+        }
+        if (ret == ERROR_SUCCESS)
+        {
+            FixupProxiedXInput(index, state);
         }
         return ret;
     }
@@ -2390,10 +2852,23 @@ DWORD dumb_XInputGetState(DWORD index, XINPUT_STATE *state, DWORD caller_version
 
     if (controllers[index].xinput_index != -1)
     {
-        int ret = (ProcXInputGetState)(controllers[index].xinput_index, state);
+        int ret;
+        if (ProcXInputGetState)
+            ret = (ProcXInputGetState)(controllers[index].xinput_index, state);
+        else if (ProcXInputGetStateEx)
+            ret = (ProcXInputGetStateEx)(controllers[index].xinput_index, state);
+        else
+            ret = ERROR_DEVICE_NOT_CONNECTED;
+
         if (ret == ERROR_DEVICE_NOT_CONNECTED)
         {
             controllers[index].connected = false;
+            return ret;
+        }
+        if (ret == ERROR_SUCCESS)
+        {
+            FixupProxiedXInput(index, state);
+            state->Gamepad.wButtons &= ~XINPUT_GAMEPAD_GUIDE;
         }
         return ret;
     }

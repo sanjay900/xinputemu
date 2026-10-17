@@ -79,6 +79,14 @@ build/64/xinput9_1_0.dll: xinput9_1_0/exports.def dumbxinputemu/dinput_input.64.
 	mkdir -p build/64/
 	${GCC64} --shared ${CFLAGS} ${INCLUDE_DIR64} ${LIB_DIR64} $? ${LIBS} -o $@
 
+# ------ tools
+
+build/32/gip_probe.exe: tools/gip_probe.c
+	mkdir -p build/32/
+	${GCC32} ${CFLAGS} -Wall ${INCLUDE_DIR32} $< -lruntimeobject -o $@
+
+gip_probe: build/32/gip_probe.exe
+
 clean:
 	rm -f dumbxinputemu/*.o
 	rm -f xinput1_1/*.o
