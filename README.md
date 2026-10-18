@@ -3,12 +3,10 @@ Santroller xinput Emulator
 
 This is an xinput dll reimplementation compatible with DirectInput controllers. Think of x360ce without the configuration. For supported instruments, it makes sure to set the correct subtype.
 
-For linux, you will need to make sure you have udev rules that all access to hidraw, as we now talk to devices raw so we get more control.
-
 Supported instruments:
 - Santroller Guitars and adapters (works on windows and linux)
-- PS3 RB / GH (requires disabling SDL for wine, just works on windows)
-- PS4 / PS5 RB (requires clipper on windows, requires [hid-sony](https://github.com/Rosalie241/hid-sony) on linux)
+- PS3 RB / GH (Works on windows and linux)
+- PS4 / PS5 RB (requires a recent linux kernel for linux, just works on windows)
 - XInput guitars (works on windows and linux)
 - Xbox One Guitars
 - CRKD Guitars (use PC mode 8 / legacy pc mode)
