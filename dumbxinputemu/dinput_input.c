@@ -475,14 +475,8 @@ static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revis
     if (vidpid == MAKELONG(0x1209, 0x2883)) {
         GetSantrollerSubtypeOverride(&caps->subtype, &caps->device_type);
         caps->console_type = santroller_2;
+        // Only query features when we own the HID handle; XInput-proxied devices already report their subtype
         hid_device *query_dev = device;
-        bool opened_temp = false;
-        if (!query_dev) {
-            query_dev = hid_open(0x1209, 0x2883, NULL);
-            if (query_dev) {
-                opened_temp = true;
-            }
-        }
         if (query_dev) {
             int written = 0;
             const uint8_t featuresGetCommand[SANTROLLER_DEVICE_FEATURES_SET_REPORT_SIZE] = { SANTROLLER_DEVICE_REPORT_ID_FEATURES, 0 };
@@ -600,9 +594,6 @@ static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revis
                         break;
                     }
                 }
-            }
-            if (opened_temp) {
-                hid_close(query_dev);
             }
         }
     }
@@ -2619,14 +2610,14 @@ static void dinput_start(void)
                 XINPUT_CAPABILITIES_EX caps2;
                 if ((ProcXInputGetCapabilitiesEx)(1, i, 0, &caps2) != ERROR_DEVICE_NOT_CONNECTED)
                 {
-                    TRACE("xinput vid: %04x, pid: %04x!\n", caps2.VendorId, caps2.ProductId);
+                    TRACE("xinput vid: %04x, pid: %04x, subtype: %02x!\n", caps2.VendorId, caps2.ProductId, caps2.Capabilities.SubType);
                     TRACE("found xinput device, proxying\r\n");
                     controllers[dinput.mapped].xinput_index = i;
                     controllers[dinput.mapped].connected = TRUE;
-                    controllers[dinput.mapped].caps.subtype = caps2.Capabilities.SubType;
-                    controllers[dinput.mapped].caps.vid = caps2.VendorId;
-                    controllers[dinput.mapped].caps.pid = caps2.ProductId;
                     dinput_fill_caps(&controllers[dinput.mapped].caps, MAKELONG(caps2.VendorId, caps2.ProductId), caps2.VersionNumber, NULL);
+                    // fill_caps defaults unknown devices to gamepad, so trust the subtype XInput reported unless it's a plain gamepad
+                    if (caps2.Capabilities.SubType != XINPUT_DEVSUBTYPE_GAMEPAD)
+                        controllers[dinput.mapped].caps.subtype = caps2.Capabilities.SubType;
                     if (caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GUITAR && override_rb)
                     {
                         TRACE("found RB guitar, proxying as GH guitar\r\n");
