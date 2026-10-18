@@ -8,7 +8,7 @@ Supported instruments:
 - PS3 RB / GH (Works on windows and linux)
 - PS4 / PS5 RB (requires a recent linux kernel for linux, just works on windows)
 - XInput guitars (works on windows and linux)
-- Xbox One Guitars
+- Xbox One Guitars (works on windows, does not work on linux)
 - CRKD Guitars (use PC mode 8 / legacy pc mode)
 - Raphnet wii adapters (just works on windows, requires [hidraw](#raphnet-adapters-on-wine) on wine)
 - Raphnet PSX adapters (untested, should just work on windows, requires [hidraw](#raphnet-adapters-on-wine) on wine)
