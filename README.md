@@ -16,8 +16,6 @@ Supported instruments:
 ##### Usage
 - download and extract the [latest release](https://github.com/sanjay900/xinputemu/releases/latest)
 - copy all xinputXYZ.dll's next to the game executable and start the game
-- on Wine, dumbxinputemu uses evdev and ignores jsdev devices by default. That should work with almost everything,
-  but you can control this behavior using `XINPUT_NO_IGNORE_JS` and `XINPUT_IGNORE_EVDEV` environment variables.
 
 ##### Raphnet adapters on Wine
 Wine's SDL backend maps raphnet adapters as classic controllers, which drops strum up, whammy and the slider.
