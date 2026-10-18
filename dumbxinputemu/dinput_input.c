@@ -199,7 +199,8 @@ static bool OverrideWireless()
     return override_wireless;
 }
 
-static void GetSantrollerSubtypeOverride(int *out_subtype, device_type_t *out_device_type)
+// For devices whose instrument type can't be queried without raw HID access, read it from input_config.ini
+static void GetSubtypeOverride(const char *section, const char *legacy_key, int *out_subtype, device_type_t *out_device_type)
 {
     CHAR Buffer[MAX_PATH];
     CHAR SubtypeStr[64];
@@ -210,10 +211,10 @@ static void GetSantrollerSubtypeOverride(int *out_subtype, device_type_t *out_de
     *out_subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
     *out_device_type = gh_guitar;
 
-    GetPrivateProfileStringA("santroller", "subtype", "", SubtypeStr, sizeof(SubtypeStr), Buffer);
-    if (SubtypeStr[0] == '\0')
+    GetPrivateProfileStringA(section, "subtype", "", SubtypeStr, sizeof(SubtypeStr), Buffer);
+    if (SubtypeStr[0] == '\0' && legacy_key)
     {
-        GetPrivateProfileStringA("overrides", "santroller_subtype", "", SubtypeStr, sizeof(SubtypeStr), Buffer);
+        GetPrivateProfileStringA("overrides", legacy_key, "", SubtypeStr, sizeof(SubtypeStr), Buffer);
     }
 
     if (SubtypeStr[0] != '\0')
@@ -473,7 +474,7 @@ static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revis
     caps->vid = LOWORD(vidpid);
     caps->pid = HIWORD(vidpid);
     if (vidpid == MAKELONG(0x1209, 0x2883)) {
-        GetSantrollerSubtypeOverride(&caps->subtype, &caps->device_type);
+        GetSubtypeOverride("santroller", "santroller_subtype", &caps->subtype, &caps->device_type);
         caps->console_type = santroller_2;
         // Only query features when we own the HID handle; XInput-proxied devices already report their subtype
         hid_device *query_dev = device;
@@ -2618,6 +2619,8 @@ static void dinput_start(void)
                     // fill_caps defaults unknown devices to gamepad, so trust the subtype XInput reported unless it's a plain gamepad
                     if (caps2.Capabilities.SubType != XINPUT_DEVSUBTYPE_GAMEPAD)
                         controllers[dinput.mapped].caps.subtype = caps2.Capabilities.SubType;
+                    if (controllers[dinput.mapped].caps.console_type == raphnet_wii || controllers[dinput.mapped].caps.console_type == raphnet_ps2)
+                        TRACE("raphnet adapter found via Wine's SDL mapping, enable hidraw for vendor 289b to use it as an instrument\n");
                     if (caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GUITAR && override_rb)
                     {
                         TRACE("found RB guitar, proxying as GH guitar\r\n");
