@@ -13,11 +13,11 @@ INCLUDE = include/	# used in as ${USR}/${MINGWxy}/${INCLUDE}
 # Computed
 GCC32 = ${BIN}/${MINGW32}-gcc
 INCLUDE_DIR32 = -I${USR}/${MINGW32}/include -Idumbxinputemu -Ihidapi-win/include
-LIB_DIR32 = -L{USR}/${MINGW32}/lib/ -Lhidapi-win/x86
+LIB_DIR32 = -L${USR}/${MINGW32}/lib/ -Lhidapi-win/x86
 
 GCC64 = ${BIN}/${MINGW64}-gcc
 INCLUDE_DIR64 = -I${USR}/${MINGW64}/include -Idumbxinputemu -Ihidapi-win/include
-LIB_DIR64 = -L{USR}/${MINGW64}/lib/ -Lhidapi-win/x64
+LIB_DIR64 = -L${USR}/${MINGW64}/lib/ -Lhidapi-win/x64
 
 .PHONY: default
 default: 32bit 64bit

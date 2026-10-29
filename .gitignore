@@ -33,6 +33,7 @@
 *.su
 .vscode
 !dlls/*
+!hidapi-win/**
 build.zip
 build_gh3.zip
 build/**/input_config.ini

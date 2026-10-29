@@ -2,12 +2,17 @@ name: Release build
 
 on:
   push:
+    branches:
+      - master
     tags:
       - "*"
+  pull_request:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -15,21 +20,23 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y mingw-w64 make
+          sudo apt-get install -y mingw-w64 make zip
 
       - name: Build
         run: make all
 
-      - name: zip
-        run: zip -r build.zip build
-
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: xinput-dll
-          path: build.zip
+          name: xinput-builds
+          path: |
+            build.zip
+            build_gh3.zip
 
       - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: build.zip
+          files: |
+            build.zip
+            build_gh3.zip
