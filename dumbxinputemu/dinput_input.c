@@ -2690,21 +2690,10 @@ static void FixupProxiedXInput(int index, XINPUT_STATE *state)
         return;
 
     // Check if this is a PlayStation guitar (PS3, PS4, PS5)
-    bool is_ps_guitar = false;
-    if (controllers[index].caps.device_type == gh_guitar || controllers[index].caps.device_type == rb_guitar)
-    {
-        if (controllers[index].caps.console_type == ps3 ||
-            controllers[index].caps.console_type == ps4 ||
-            controllers[index].caps.console_type == ps5 ||
-            controllers[index].caps.vid == 0x12BA ||
-            controllers[index].caps.vid == 0x1BAD ||
-            controllers[index].caps.vid == 0x0E6F ||
-            controllers[index].caps.vid == 0x3651 ||
-            controllers[index].caps.vid == 0x0738)
-        {
-            is_ps_guitar = true;
-        }
-    }
+    bool is_ps_guitar = (controllers[index].caps.device_type == gh_guitar || controllers[index].caps.device_type == rb_guitar) &&
+                        (controllers[index].caps.console_type == ps3 ||
+                         controllers[index].caps.console_type == ps4 ||
+                         controllers[index].caps.console_type == ps5);
 
     if (is_ps_guitar)
     {
@@ -2715,8 +2704,7 @@ static void FixupProxiedXInput(int index, XINPUT_STATE *state)
         // Other PlayStation guitars (Rock Band PS3, PS4, PS5) have Square as Yellow and Triangle as Blue,
         // so they need X and Y swapped.
         bool is_ps3_gh = (controllers[index].caps.device_type == gh_guitar &&
-                          (controllers[index].caps.console_type == ps3 ||
-                           (controllers[index].caps.vid == 0x12BA && controllers[index].caps.pid == 0x0100)));
+                          controllers[index].caps.console_type == ps3);
         if (!is_ps3_gh)
         {
             WORD buttons = state->Gamepad.wButtons;
