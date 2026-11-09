@@ -14,6 +14,9 @@
 #include "ps5.h"
 #include "raphnet_reports.h"
 #include <pthread.h>
+#include <limits.h>
+#include <winreg.h>
+#include <cfgmgr32.h>
 typedef enum
 {
     gamepad,
@@ -89,6 +92,14 @@ static const uint8_t dpad_bindings_reverse[] = {UP, UP | RIGHT, RIGHT, DOWN | RI
 // Not real XInput buttons, a digital trigger press for pads without analog triggers
 #define GENERIC_BUTTON_LT 0x10000
 #define GENERIC_BUTTON_RT 0x20000
+// a digital tilt switch, pushes the right stick's Y axis all the way like an XInput guitar's tilt
+#define GENERIC_BUTTON_TILT 0x40000
+#define SHANWAN_VID 0x2563
+#define SHANWAN_PS2_ADAPTER_PID 0x0523
+#define PS2_ADAPTER_GAMEPAD_BUTTONS "y,b,a,x,lb,rb,lt,rt,back,start,ls,rs"
+// a PS2 guitar's frets come through as R2 (green), circle (red), triangle (yellow), cross (blue) and square (orange),
+// L1 is orange on some guitars, R1 is the star power pedal and L2 is tilt
+#define PS2_ADAPTER_GUITAR_BUTTONS "y,b,x,lb,lb,back,tilt,a,back,start"
 #ifndef HID_USAGE_SIMULATION_ACCELERATOR
 #define HID_USAGE_SIMULATION_ACCELERATOR ((USAGE)0xC4)
 #endif
@@ -116,6 +127,10 @@ typedef struct
     USAGE page, usage;
     LONG min, max;
     USHORT bits;
+    // set from input_config.ini: use only one side of the axis from its centre (1 towards max, -1 towards min),
+    // and flip the result
+    int half;
+    BOOL invert;
 } generic_value_t;
 
 struct GenericHid
@@ -126,11 +141,19 @@ struct GenericHid
     UCHAR report_id;
     generic_value_t values[generic_value_count];
     uint32_t button_map[GENERIC_HID_MAX_BUTTONS];
+    // what the hat's up, down, left and right turn into
+    uint32_t hat_map[4];
+    // a ShanWan PS2 to USB adapter, which can have a PS2 gamepad or guitar plugged in
+    BOOL ps2_adapter;
+    // a gamepad Wine built from an SDL game controller, see hid_device_add_gamepad in winebus.sys
+    BOOL wine_gamepad;
 };
 
 struct CapsFlags
 {
     BOOL wireless, jedi, pov, windows, macos, sdl, ps2needschecking, ps3thirdparty, dpad_as_buttons, y_axis_inverted;
+    // a gamepad Wine built from an SDL game controller, in the layout its own XInput reads
+    BOOL wine_gamepad;
     int axes, buttons, subtype;
     uint16_t vid, pid;
     device_type_t device_type;
@@ -150,6 +173,7 @@ static struct ControllerMap
     uint64_t gip_device_id;
     uint8_t gip_last_sequence;
     struct GenericHid *generic;
+    wchar_t serial[128];
 } controllers[XUSER_MAX_COUNT];
 
 static struct
@@ -246,62 +270,38 @@ static bool OverrideWireless()
     return override_wireless;
 }
 
-// For devices whose instrument type can't be queried without raw HID access, read it from input_config.ini
-static void GetSubtypeOverride(const char *section, const char *legacy_key, int *out_subtype, device_type_t *out_device_type)
+// Turns a subtype name from input_config.ini into an XInput subtype, false (leaving the outputs alone) if it isn't one
+static bool ParseSubtype(const char *SubtypeStr, int *out_subtype, device_type_t *out_device_type)
 {
-    CHAR Buffer[MAX_PATH];
-    CHAR SubtypeStr[64];
-    GetCurrentDirectoryA(MAX_PATH, Buffer);
-    strcat(Buffer, "\\input_config.ini");
-
-    // Default to Guitar Hero guitar
-    *out_subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-    *out_device_type = gh_guitar;
-
-    GetPrivateProfileStringA(section, "subtype", "", SubtypeStr, sizeof(SubtypeStr), Buffer);
-    if (SubtypeStr[0] == '\0' && legacy_key)
+    static const struct
     {
-        GetPrivateProfileStringA("overrides", legacy_key, "", SubtypeStr, sizeof(SubtypeStr), Buffer);
-    }
-
-    if (SubtypeStr[0] != '\0')
+        const char *name;
+        int subtype;
+        device_type_t device_type;
+    } subtypes[] = {
+        {"guitar", XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE, gh_guitar},
+        {"gh_guitar", XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE, gh_guitar},
+        {"guitar_alternate", XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE, gh_guitar},
+        {"rb_guitar", XINPUT_DEVSUBTYPE_GUITAR, rb_guitar},
+        {"drums", XINPUT_DEVSUBTYPE_DRUM_KIT, gh_drum},
+        {"drum", XINPUT_DEVSUBTYPE_DRUM_KIT, gh_drum},
+        {"gh_drum", XINPUT_DEVSUBTYPE_DRUM_KIT, gh_drum},
+        {"rb_drum", XINPUT_DEVSUBTYPE_DRUM_KIT, rb_drum},
+        {"rb_drums", XINPUT_DEVSUBTYPE_DRUM_KIT, rb_drum},
+        {"gamepad", XINPUT_DEVSUBTYPE_GAMEPAD, gamepad},
+        {"live_guitar", XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE, live_guitar},
+        {"turntable", XINPUT_DEVSUBTYPE_TURNTABLE, turntable},
+    };
+    for (size_t i = 0; i < sizeof(subtypes) / sizeof(subtypes[0]); i++)
     {
-        if (strcasecmp(SubtypeStr, "guitar") == 0 || strcasecmp(SubtypeStr, "gh_guitar") == 0 || strcasecmp(SubtypeStr, "guitar_alternate") == 0)
+        if (strcasecmp(SubtypeStr, subtypes[i].name) == 0)
         {
-            *out_subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-            *out_device_type = gh_guitar;
-        }
-        else if (strcasecmp(SubtypeStr, "rb_guitar") == 0)
-        {
-            *out_subtype = XINPUT_DEVSUBTYPE_GUITAR;
-            *out_device_type = rb_guitar;
-        }
-        else if (strcasecmp(SubtypeStr, "drums") == 0 || strcasecmp(SubtypeStr, "drum") == 0 || strcasecmp(SubtypeStr, "gh_drum") == 0)
-        {
-            *out_subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
-            *out_device_type = gh_drum;
-        }
-        else if (strcasecmp(SubtypeStr, "rb_drum") == 0 || strcasecmp(SubtypeStr, "rb_drums") == 0)
-        {
-            *out_subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
-            *out_device_type = rb_drum;
-        }
-        else if (strcasecmp(SubtypeStr, "gamepad") == 0)
-        {
-            *out_subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
-            *out_device_type = gamepad;
-        }
-        else if (strcasecmp(SubtypeStr, "live_guitar") == 0)
-        {
-            *out_subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-            *out_device_type = live_guitar;
-        }
-        else if (strcasecmp(SubtypeStr, "turntable") == 0)
-        {
-            *out_subtype = XINPUT_DEVSUBTYPE_TURNTABLE;
-            *out_device_type = turntable;
+            *out_subtype = subtypes[i].subtype;
+            *out_device_type = subtypes[i].device_type;
+            return true;
         }
     }
+    return false;
 }
 
 static bool IsMacos()
@@ -357,6 +357,12 @@ static bool IsVendorHidRaw(uint16_t vid)
         return true;
     if (!SDLEnabled())
         return true;
+
+    // DisableHidraw wins over any per vendor setting, winebus checks it first
+    DWORD disabled = 0;
+    DWORD disabled_size = sizeof(disabled);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Services\\WineBus", L"DisableHidraw", RRF_RT_DWORD, NULL, (LPBYTE)&disabled, &disabled_size) == ERROR_SUCCESS && disabled)
+        return false;
 
     wchar_t regKey[64];
     swprintf(regKey, sizeof(regKey) / sizeof(regKey[0]), L"System\\CurrentControlSet\\Services\\WineBus\\Devices\\%04x", vid);
@@ -684,50 +690,85 @@ static const struct
     {"down", XINPUT_GAMEPAD_DPAD_DOWN},
     {"left", XINPUT_GAMEPAD_DPAD_LEFT},
     {"right", XINPUT_GAMEPAD_DPAD_RIGHT},
+    {"tilt", GENERIC_BUTTON_TILT},
     {"none", 0},
 };
 
-// There is no standard button order for HID gamepads, so this can be changed in input_config.ini, either for
-// every generic gamepad under [generic] or for one under [generic_VVVV_PPPP], e.g.
-// buttons=x,a,b,y,lb,rb,lt,rt,back,start,ls,rs,guide
-// The default is the order DualShock 4 / DualSense style pads (and Logitech pads in DirectInput mode) use:
-// square, cross, circle, triangle, L1, R1, L2, R2, share, options, L3, R3, PS
-// where the first entry is HID button 1
-static void generic_load_button_map(struct GenericHid *generic, uint16_t vid, uint16_t pid)
+// Reads a generic gamepad setting from input_config.ini, [generic_VVVV_PPPP] first and then [generic] (unless it's a
+// device we have our own defaults for)
+static void generic_config_string(struct GenericHid *generic, uint16_t vid, uint16_t pid, const char *key, const char *fallback, char *out, DWORD size)
 {
     CHAR path[MAX_PATH];
     CHAR section[32];
-    CHAR map[512];
     GetCurrentDirectoryA(MAX_PATH, path);
     strcat(path, "\\input_config.ini");
     snprintf(section, sizeof(section), "generic_%04x_%04x", vid, pid);
-    GetPrivateProfileStringA(section, "buttons", "", map, sizeof(map), path);
-    if (map[0] == '\0')
-        GetPrivateProfileStringA("generic", "buttons", "x,a,b,y,lb,rb,lt,rt,back,start,ls,rs,guide", map, sizeof(map), path);
-    TRACE("Generic gamepad button map: %s\n", map);
+    bool builtin = generic->ps2_adapter || generic->wine_gamepad;
+    GetPrivateProfileStringA(section, key, builtin ? fallback : "", out, size, path);
+    if (out[0] == '\0' && !builtin)
+        GetPrivateProfileStringA("generic", key, fallback, out, size, path);
+}
 
-    memset(generic->button_map, 0, sizeof(generic->button_map));
-    int button = 0;
+static char *generic_trim(char *token)
+{
+    while (*token == ' ' || *token == '\t')
+        token++;
+    char *end = token + strlen(token);
+    while (end > token && (end[-1] == ' ' || end[-1] == '\t'))
+        *--end = '\0';
+    return token;
+}
+
+// Fills map from a comma separated list of button names, entries past the end of the list do nothing
+static void generic_parse_buttons(char *list, uint32_t *map, int count)
+{
+    memset(map, 0, count * sizeof(*map));
+    int index = 0;
     char *context = NULL;
-    for (char *token = strtok_r(map, ",", &context); token && button < GENERIC_HID_MAX_BUTTONS; token = strtok_r(NULL, ",", &context), button++)
+    for (char *token = strtok_r(list, ",", &context); token && index < count; token = strtok_r(NULL, ",", &context), index++)
     {
-        while (*token == ' ' || *token == '\t')
-            token++;
-        char *end = token + strlen(token);
-        while (end > token && (end[-1] == ' ' || end[-1] == '\t'))
-            *--end = '\0';
+        token = generic_trim(token);
         bool known = false;
         for (size_t i = 0; i < sizeof(generic_button_names) / sizeof(generic_button_names[0]); i++)
         {
             if (strcasecmp(token, generic_button_names[i].name) == 0)
             {
-                generic->button_map[button] = generic_button_names[i].button;
+                map[index] = generic_button_names[i].button;
                 known = true;
                 break;
             }
         }
         if (!known)
-            TRACE("Unknown button '%s' in generic button map, ignoring it\n", token);
+            TRACE("Unknown button '%s' in generic gamepad config, ignoring it\n", token);
+    }
+}
+
+// Settings for unrecognised gamepads, from [generic] or [generic_VVVV_PPPP] in input_config.ini.
+// There is no standard button order for HID gamepads, so buttons lists what HID button 1, 2, 3... turn into.
+// The default is the order DualShock 4 / DualSense style pads (and Logitech pads in DirectInput mode) use:
+// square, cross, circle, triangle, L1, R1, L2, R2, share, options, L3, R3, PS
+// hat lists what the hat's up, down, left and right turn into, and subtype changes what the game is told the device is.
+static void generic_load_config(struct ControllerMap *controller, struct GenericHid *generic)
+{
+    CHAR value[512];
+    uint16_t vid = controller->caps.vid, pid = controller->caps.pid;
+
+    // PS2 adapters number the buttons triangle, circle, cross, square, L1, R1, L2, R2, select, start, L3, R3
+    generic_config_string(generic, vid, pid, "buttons", generic->ps2_adapter ? PS2_ADAPTER_GAMEPAD_BUTTONS : generic->wine_gamepad ? "a,b,x,y,lb,rb,back,start,ls,rs" : "x,a,b,y,lb,rb,lt,rt,back,start,ls,rs,guide", value, sizeof(value));
+    TRACE("Generic gamepad button map: %s\n", value);
+    generic_parse_buttons(value, generic->button_map, GENERIC_HID_MAX_BUTTONS);
+
+    generic_config_string(generic, vid, pid, "hat", "up,down,left,right", value, sizeof(value));
+    generic_parse_buttons(value, generic->hat_map, 4);
+
+    generic_config_string(generic, vid, pid, "subtype", "", value, sizeof(value));
+    char *subtype = generic_trim(value);
+    if (subtype[0])
+    {
+        if (ParseSubtype(subtype, &controller->caps.subtype, &controller->caps.device_type))
+            TRACE("Generic gamepad subtype: %s\n", subtype);
+        else
+            TRACE("Unknown subtype '%s' in generic gamepad config, ignoring it\n", subtype);
     }
 }
 
@@ -776,6 +817,8 @@ static bool generic_hid_open(struct ControllerMap *controller, const char *path)
 
     struct GenericHid *generic = calloc(1, sizeof(*generic));
     generic->preparsed = preparsed;
+    generic->ps2_adapter = controller->caps.vid == SHANWAN_VID && controller->caps.pid == SHANWAN_PS2_ADAPTER_PID;
+    generic->wine_gamepad = controller->caps.wine_gamepad;
     generic->report_length = caps.InputReportByteLength;
 
     USHORT value_count = caps.NumberInputValueCaps;
@@ -857,15 +900,111 @@ static bool generic_hid_open(struct ControllerMap *controller, const char *path)
     {
         GENERIC_AXIS(generic_rx, HID_USAGE_GENERIC_Z);
     }
+    if (generic->wine_gamepad)
+    {
+        // read it the way Wine's XInput does: sticks on X / Y and Rx / Ry with Y already pointing up, triggers on Z / Rz,
+        // or older versions put both triggers on Z
+        for (int role = generic_lx; role <= generic_combined_triggers; role++)
+            generic->values[role].present = FALSE;
+        GENERIC_AXIS(generic_lx, HID_USAGE_GENERIC_X);
+        GENERIC_AXIS(generic_ly, HID_USAGE_GENERIC_Y);
+        GENERIC_AXIS(generic_rx, HID_USAGE_GENERIC_RX);
+        GENERIC_AXIS(generic_ry, HID_USAGE_GENERIC_RY);
+        if (axes[HID_USAGE_GENERIC_RZ])
+        {
+            GENERIC_AXIS(generic_lt, HID_USAGE_GENERIC_Z);
+            GENERIC_AXIS(generic_rt, HID_USAGE_GENERIC_RZ);
+        }
+        else
+        {
+            GENERIC_AXIS(generic_combined_triggers, HID_USAGE_GENERIC_Z);
+        }
+        generic->values[generic_ly].invert = TRUE;
+        generic->values[generic_ry].invert = TRUE;
+    }
 #undef GENERIC_AXIS
     if (brake)
         generic_set_value(generic, generic_lt, brake, HID_USAGE_SIMULATION_BRAKE);
     if (accelerator)
         generic_set_value(generic, generic_rt, accelerator, HID_USAGE_SIMULATION_ACCELERATOR);
+
+    // input_config.ini can replace those guesses, e.g. rx=-y- for "the right stick's X is the top half of the Y axis, flipped"
+    // a trailing + or - only uses the side of the axis from its centre to its max or min, a leading - flips it
+    static const char *role_keys[] = {"lx", "ly", "rx", "ry", "lt", "rt", "triggers"};
+    static const struct
+    {
+        const char *name;
+        USAGE usage;
+    } axis_names[] = {
+        {"x", HID_USAGE_GENERIC_X},
+        {"y", HID_USAGE_GENERIC_Y},
+        {"z", HID_USAGE_GENERIC_Z},
+        {"rx", HID_USAGE_GENERIC_RX},
+        {"ry", HID_USAGE_GENERIC_RY},
+        {"rz", HID_USAGE_GENERIC_RZ},
+        {"slider", HID_USAGE_GENERIC_SLIDER},
+        {"dial", HID_USAGE_GENERIC_DIAL},
+        {"wheel", HID_USAGE_GENERIC_WHEEL},
+        {"brake", HID_USAGE_SIMULATION_BRAKE},
+        {"accelerator", HID_USAGE_SIMULATION_ACCELERATOR},
+    };
+    for (int role = 0; role < (int)(sizeof(role_keys) / sizeof(role_keys[0])); role++)
+    {
+        CHAR setting[64];
+        generic_config_string(generic, controller->caps.vid, controller->caps.pid, role_keys[role], "", setting, sizeof(setting));
+        char *source = generic_trim(setting);
+        if (!source[0])
+            continue;
+        generic->values[role].present = FALSE;
+        if (strcasecmp(source, "none") == 0)
+            continue;
+        BOOL invert = FALSE;
+        int half = 0;
+        if (source[0] == '-')
+        {
+            invert = TRUE;
+            source++;
+        }
+        size_t length = strlen(source);
+        if (length && (source[length - 1] == '+' || source[length - 1] == '-'))
+        {
+            half = source[length - 1] == '+' ? 1 : -1;
+            source[length - 1] = '\0';
+        }
+        const HIDP_VALUE_CAPS *found = NULL;
+        USAGE usage = 0;
+        for (size_t i = 0; i < sizeof(axis_names) / sizeof(axis_names[0]); i++)
+        {
+            if (strcasecmp(source, axis_names[i].name) != 0)
+                continue;
+            usage = axis_names[i].usage;
+            if (usage == HID_USAGE_SIMULATION_BRAKE)
+                found = brake;
+            else if (usage == HID_USAGE_SIMULATION_ACCELERATOR)
+                found = accelerator;
+            else
+                found = axes[usage];
+            break;
+        }
+        if (!found)
+        {
+            TRACE("Generic gamepad has no '%s' axis for %s, leaving it unmapped\n", source, role_keys[role]);
+            continue;
+        }
+        generic_set_value(generic, role, found, usage);
+        generic->values[role].half = half;
+        generic->values[role].invert = invert;
+    }
     free(value_caps);
     free(button_caps);
 
-    generic_load_button_map(generic, controller->caps.vid, controller->caps.pid);
+    generic_load_config(controller, generic);
+    if (generic->ps2_adapter)
+    {
+        // a guitar holds d-pad left, so the first report says which one is plugged in
+        TRACE("PS2 usb adapter detected!\n");
+        controller->caps.ps2needschecking = true;
+    }
     controller->generic = generic;
 
     static const char *role_names[] = {"lx", "ly", "rx", "ry", "lt", "rt", "combined triggers", "hat"};
@@ -873,8 +1012,10 @@ static bool generic_hid_open(struct ControllerMap *controller, const char *path)
     for (int i = 0; i < generic_value_count; i++)
     {
         if (generic->values[i].present)
-            TRACE("  %s: page %02x usage %02x (%ld - %ld, %u bits)\n", role_names[i], generic->values[i].page,
-                  generic->values[i].usage, generic->values[i].min, generic->values[i].max, generic->values[i].bits);
+            TRACE("  %s: page %02x usage %02x (%ld - %ld, %u bits)%s%s\n", role_names[i], generic->values[i].page,
+                  generic->values[i].usage, generic->values[i].min, generic->values[i].max, generic->values[i].bits,
+                  generic->values[i].half ? (generic->values[i].half > 0 ? " centre to max" : " centre to min") : "",
+                  generic->values[i].invert ? " inverted" : "");
     }
     return true;
 }
@@ -899,18 +1040,39 @@ static bool generic_read_value(struct GenericHid *generic, generic_value_role_t 
         *out = (uint32_t)(signed_value - value->min);
         return true;
     }
-    *out = (uint32_t)(((int64_t)signed_value - value->min) * 65535 / ((int64_t)value->max - value->min));
+    uint32_t scaled = (uint32_t)(((int64_t)signed_value - value->min) * 65535 / ((int64_t)value->max - value->min));
+    if (value->half > 0)
+        scaled = scaled > 32768 ? min((scaled - 32768) * 2, 65535) : 0;
+    else if (value->half < 0)
+        scaled = scaled < 32768 ? min((32768 - scaled) * 2, 65535) : 0;
+    if (value->invert)
+        scaled = 65535 - scaled;
+    *out = scaled;
     return true;
 }
 
-static void generic_hid_update(struct GenericHid *generic, const uint8_t *data, int size, XINPUT_GAMEPAD *gamepad)
+static void generic_press(XINPUT_GAMEPAD *gamepad, uint32_t button)
 {
-    uint8_t report[GENERIC_HID_MAX_REPORT] = {0};
+    if (button == GENERIC_BUTTON_LT)
+        gamepad->bLeftTrigger = 255;
+    else if (button == GENERIC_BUTTON_RT)
+        gamepad->bRightTrigger = 255;
+    else if (button == GENERIC_BUTTON_TILT)
+        gamepad->sThumbRY = 32767;
+    else
+        gamepad->wButtons |= (WORD)button;
+}
+
+// Copies a report from hidapi into the layout HidP wants, false if it isn't the report holding the gamepad's controls
+static bool generic_build_report(struct GenericHid *generic, const uint8_t *data, int size, uint8_t *report)
+{
+    memset(report, 0, GENERIC_HID_MAX_REPORT);
+    if (size <= 0)
+        return false;
     if (generic->report_id)
     {
-        // anything other than the gamepad's report keeps the last state
         if (data[0] != generic->report_id)
-            return;
+            return false;
         memcpy(report, data, min(size, generic->report_length));
     }
     else
@@ -918,6 +1080,28 @@ static void generic_hid_update(struct GenericHid *generic, const uint8_t *data, 
         // hidapi drops the 0 report ID windows puts in front of reports from devices without report IDs, but HidP wants it
         memcpy(report + 1, data, min(size, generic->report_length - 1));
     }
+    return true;
+}
+
+// The hat as UP / DOWN / LEFT / RIGHT bits, 0 when centred or missing
+static uint8_t generic_read_hat(struct GenericHid *generic, const uint8_t *report)
+{
+    uint32_t value;
+    if (!generic_read_value(generic, generic_hat, (PCHAR)report, &value))
+        return 0;
+    LONG positions = generic->values[generic_hat].max - generic->values[generic_hat].min + 1;
+    // a 4 position hat only has the cardinal directions
+    if (positions == 4)
+        value *= 2;
+    return value < 8 ? dpad_bindings_reverse[value] : 0;
+}
+
+static void generic_hid_update(struct GenericHid *generic, const uint8_t *data, int size, XINPUT_GAMEPAD *gamepad)
+{
+    uint8_t report[GENERIC_HID_MAX_REPORT];
+    // anything other than the gamepad's report keeps the last state
+    if (!generic_build_report(generic, data, size, report))
+        return;
 
     uint32_t value;
     if (generic_read_value(generic, generic_lx, (PCHAR)report, &value))
@@ -941,25 +1125,15 @@ static void generic_hid_update(struct GenericHid *generic, const uint8_t *data, 
             gamepad->bRightTrigger = min((32768 - value) >> 7, 255);
     }
 
-    if (generic_read_value(generic, generic_hat, (PCHAR)report, &value))
-    {
-        LONG positions = generic->values[generic_hat].max - generic->values[generic_hat].min + 1;
-        // a 4 position hat only has the cardinal directions
-        if (positions == 4)
-            value *= 2;
-        if (value < 8)
-        {
-            uint8_t dpad = dpad_bindings_reverse[value];
-            if (dpad & UP)
-                gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_UP;
-            if (dpad & DOWN)
-                gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
-            if (dpad & LEFT)
-                gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
-            if (dpad & RIGHT)
-                gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
-        }
-    }
+    uint8_t dpad = generic_read_hat(generic, report);
+    if (dpad & UP)
+        generic_press(gamepad, generic->hat_map[0]);
+    if (dpad & DOWN)
+        generic_press(gamepad, generic->hat_map[1]);
+    if (dpad & LEFT)
+        generic_press(gamepad, generic->hat_map[2]);
+    if (dpad & RIGHT)
+        generic_press(gamepad, generic->hat_map[3]);
 
     USAGE usages[128];
     ULONG usage_count = sizeof(usages) / sizeof(usages[0]);
@@ -969,14 +1143,67 @@ static void generic_hid_update(struct GenericHid *generic, const uint8_t *data, 
         {
             if (usages[i] < 1 || usages[i] > GENERIC_HID_MAX_BUTTONS)
                 continue;
-            uint32_t button = generic->button_map[usages[i] - 1];
-            if (button == GENERIC_BUTTON_LT)
-                gamepad->bLeftTrigger = 255;
-            else if (button == GENERIC_BUTTON_RT)
-                gamepad->bRightTrigger = 255;
-            else
-                gamepad->wButtons |= (WORD)button;
+            generic_press(gamepad, generic->button_map[usages[i] - 1]);
         }
+    }
+    if (generic->wine_gamepad)
+    {
+        // Wine puts the guide button on its own page
+        usage_count = sizeof(usages) / sizeof(usages[0]);
+        if (HidP_GetUsages(HidP_Input, (USAGE)0xFF00, 0, usages, &usage_count, generic->preparsed, (PCHAR)report, generic->report_length) == HIDP_STATUS_SUCCESS && usage_count)
+            gamepad->wButtons |= XINPUT_GAMEPAD_GUIDE;
+    }
+}
+
+// PS2 to USB adapters can't tell us whether a gamepad or a guitar is plugged in, but PS2 guitars always hold d-pad left
+// so the first report gives it away. Until then the device reports as disconnected.
+static void ps2_adapter_check(struct ControllerMap *controller, const uint8_t *data, int size)
+{
+    if (!controller->caps.ps2needschecking || size <= 0)
+        return;
+    bool left;
+    if (controller->caps.console_type == generic_hid && controller->generic)
+    {
+        uint8_t report[GENERIC_HID_MAX_REPORT];
+        if (!generic_build_report(controller->generic, data, size, report))
+            return;
+        left = generic_read_hat(controller->generic, report) & LEFT;
+    }
+    else if (controller->caps.console_type == ps3)
+    {
+        // this adapter copies the PS2 report onto a DualShock 3 one
+        left = ((PS3Gamepad_Data_t *)data)->dpadLeft;
+    }
+    else
+    {
+        controller->caps.ps2needschecking = false;
+        return;
+    }
+    controller->caps.ps2needschecking = false;
+    if (!left)
+    {
+        TRACE("PS2 gamepad detected!\n");
+        return;
+    }
+    TRACE("Setting subtype to guitar!\n");
+    TRACE("PS2 guitar detected!\n");
+    controller->caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+    controller->caps.device_type = gh_guitar;
+    if (controller->caps.console_type == generic_hid)
+    {
+        struct GenericHid *generic = controller->generic;
+        char buttons[] = PS2_ADAPTER_GUITAR_BUTTONS;
+        // d-pad left is always held, so it isn't passed on, strum is up and down
+        char hat[] = "up,down,none,right";
+        generic_parse_buttons(buttons, generic->button_map, GENERIC_HID_MAX_BUTTONS);
+        generic_parse_buttons(hat, generic->hat_map, 4);
+        // whammy is the left stick's Y axis, resting in the centre and going up when pushed
+        generic->values[generic_rx] = generic->values[generic_ly];
+        generic->values[generic_rx].half = -1;
+        generic->values[generic_rx].invert = FALSE;
+        generic->values[generic_lx].present = FALSE;
+        generic->values[generic_ly].present = FALSE;
+        generic->values[generic_ry].present = FALSE;
     }
 }
 
@@ -991,8 +1218,262 @@ static void generic_hid_update(struct GenericHid *generic, const uint8_t *data, 
 #define SANTROLLER_DEVICE_CAPABILITY_DPAD_AS_BUTTONS      0x10
 #define SANTROLLER_DEVICE_CAPABILITY_Y_AXIS_INVERTED      0x20
 
-static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revision, hid_device *device)
+#define SYSFS_USB_DEVICES "Z:\\sys\\bus\\usb\\devices"
+
+// Reads a sysfs attribute as text, without the trailing newline
+static bool sysfs_read_text(const char *device, const char *attribute, char *out, DWORD size)
 {
+    CHAR path[MAX_PATH];
+    snprintf(path, sizeof(path), SYSFS_USB_DEVICES "\\%s\\%s", device, attribute);
+    HANDLE file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+        return false;
+    DWORD read = 0;
+    BOOL ok = ReadFile(file, out, size - 1, &read, NULL);
+    CloseHandle(file);
+    if (!ok)
+        return false;
+    out[read] = '\0';
+    while (read && (out[read - 1] == '\n' || out[read - 1] == '\r' || out[read - 1] == ' '))
+        out[--read] = '\0';
+    return true;
+}
+
+// Whether a USB device in sysfs has this VID / PID, and this serial when we have one (USB serials are ASCII)
+static bool sysfs_device_matches(const char *device, uint16_t vid, uint16_t pid, const wchar_t *serial)
+{
+    CHAR value[128];
+    // interfaces are named bus-port:config.interface, we only want the devices themselves
+    if (device[0] == '.' || strchr(device, ':'))
+        return false;
+    if (!sysfs_read_text(device, "idVendor", value, sizeof(value)) || strtoul(value, NULL, 16) != vid)
+        return false;
+    if (!sysfs_read_text(device, "idProduct", value, sizeof(value)) || strtoul(value, NULL, 16) != pid)
+        return false;
+    if (serial && serial[0])
+    {
+        CHAR narrow_serial[128] = {0};
+        for (int i = 0; serial[i] && i < (int)sizeof(narrow_serial) - 1; i++)
+            narrow_serial[i] = (CHAR)serial[i];
+        if (!sysfs_read_text(device, "serial", value, sizeof(value)) || strcasecmp(value, narrow_serial) != 0)
+            return false;
+    }
+    return true;
+}
+
+// Under Wine's SDL backend the version a device reports is its evdev version, which Linux fills in with the HID spec
+// version (bcdHID) rather than bcdDevice. Santroller 1 keeps its device type in bcdDevice, so read the real one from
+// sysfs. index picks between devices that match when there's no serial to tell them apart.
+static bool sysfs_read_bcd_device(uint16_t vid, uint16_t pid, const wchar_t *serial, int index, uint16_t *bcd_device)
+{
+    if (!IsWine())
+        return false;
+    WIN32_FIND_DATAA entry;
+    HANDLE find = FindFirstFileA(SYSFS_USB_DEVICES "\\*", &entry);
+    if (find == INVALID_HANDLE_VALUE)
+        return false;
+    bool found = false;
+    int seen = 0;
+    do
+    {
+        CHAR value[16];
+        if (sysfs_device_matches(entry.cFileName, vid, pid, serial) && seen++ == index &&
+            sysfs_read_text(entry.cFileName, "bcdDevice", value, sizeof(value)))
+        {
+            *bcd_device = (uint16_t)strtoul(value, NULL, 16);
+            TRACE("bcdDevice for %04x:%04x from %s: %04x\n", vid, pid, entry.cFileName, *bcd_device);
+            found = true;
+        }
+    } while (!found && seen <= index && FindNextFileA(find, &entry));
+    FindClose(find);
+    return found;
+}
+
+// The SDL backend in Wine only passes a device's VID, PID, version, name and serial through, so the vendor descriptors
+// Santroller 2 and XInput devices use to say what they are never reach us. Linux keeps every USB device's raw
+// descriptors in sysfs though, and Wine maps / to Z:, so read them from there like SDL does on Linux.
+// Looks through the USB devices matching vid / pid (and serial, when we have one) for the index'th gamepad interface,
+// giving its Santroller 2 sub type and capabilities, or with xinput set, its XInput subtype.
+static bool sysfs_read_identity(uint16_t vid, uint16_t pid, const wchar_t *serial, int index, bool xinput, uint8_t *subtype, uint8_t *capabilities)
+{
+    if (!IsWine())
+        return false;
+    WIN32_FIND_DATAA entry;
+    HANDLE find = FindFirstFileA(SYSFS_USB_DEVICES "\\*", &entry);
+    if (find == INVALID_HANDLE_VALUE)
+    {
+        TRACE("Unable to read " SYSFS_USB_DEVICES " (%lu)\n", GetLastError());
+        return false;
+    }
+    bool found = false;
+    int seen = 0;
+    static uint8_t descriptors[65536];
+    do
+    {
+        if (!sysfs_device_matches(entry.cFileName, vid, pid, serial))
+            continue;
+
+        CHAR path[MAX_PATH];
+        snprintf(path, sizeof(path), SYSFS_USB_DEVICES "\\%s\\descriptors", entry.cFileName);
+        HANDLE file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        if (file == INVALID_HANDLE_VALUE)
+            continue;
+        DWORD length = 0, read;
+        while (length < sizeof(descriptors) && ReadFile(file, descriptors + length, sizeof(descriptors) - length, &read, NULL) && read)
+            length += read;
+        CloseHandle(file);
+
+        // the device descriptor, then each configuration descriptor with its interfaces, endpoints and class descriptors
+        bool in_interface = false;
+        uint8_t class = 0, sub_class = 0, protocol = 0;
+        for (DWORD i = 0; i + 2 <= length && descriptors[i] >= 2 && i + descriptors[i] <= length && !found; i += descriptors[i])
+        {
+            const uint8_t *descriptor = descriptors + i;
+            if (descriptor[1] == 0x04 && descriptor[0] >= 9)
+            {
+                // only look at each interface's first alternate setting
+                in_interface = descriptor[3] == 0;
+                class = descriptor[5];
+                sub_class = descriptor[6];
+                protocol = descriptor[7];
+                continue;
+            }
+            if (!in_interface)
+                continue;
+            if (!xinput && descriptor[1] == 0xFF && descriptor[0] >= 9 && memcmp(descriptor + 2, "SANT", 4) == 0)
+            {
+                in_interface = false;
+                if (seen++ == index)
+                {
+                    *subtype = descriptor[7];
+                    *capabilities = descriptor[8];
+                    found = true;
+                }
+            }
+            else if (xinput && descriptor[1] == 0x21 && descriptor[0] >= 5 && class == 0xFF && sub_class == 0x5D && protocol == 0x01)
+            {
+                in_interface = false;
+                if (seen++ == index)
+                {
+                    *subtype = descriptor[4];
+                    *capabilities = 0;
+                    found = true;
+                }
+            }
+        }
+        if (found)
+            TRACE("Found %s descriptor for %04x:%04x interface %d in %s: %02x\n", xinput ? "XInput" : "Santroller", vid, pid, index, entry.cFileName, *subtype);
+    } while (!found && FindNextFileA(find, &entry));
+    FindClose(find);
+    return found;
+}
+
+// Sets the subtype from the sub type and capabilities a Santroller 2 interface reports, either in its features report
+// or in the SANT vendor descriptor after the interface in the USB configuration descriptor
+static void santroller2_apply_identity(struct CapsFlags *caps, uint8_t sub_type, uint8_t capabilities)
+{
+    caps->dpad_as_buttons = (capabilities & SANTROLLER_DEVICE_CAPABILITY_DPAD_AS_BUTTONS) != 0;
+    caps->y_axis_inverted = (sub_type == GAMEPAD) && ((capabilities & SANTROLLER_DEVICE_CAPABILITY_Y_AXIS_INVERTED) != 0);
+
+    switch (sub_type) {
+    case STAGE_KIT:
+        caps->subtype = XINPUT_DEVSUBTYPE_STAGE_KIT;
+        caps->device_type = stage_kit;
+        TRACE("Santroller 2 stage kit detected!\n");
+        break;
+    case GAMEPAD:
+        caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
+        caps->device_type = gamepad;
+        TRACE("Santroller 2 gamepad detected!\n");
+        break;
+    case DANCE_PAD:
+        caps->subtype = XINPUT_DEVSUBTYPE_DANCE_PAD;
+        caps->device_type = gamepad;
+        TRACE("Santroller 2 dance pad detected!\n");
+        break;
+    case GUITAR_HERO_GUITAR:
+    case GUITAR_HERO_GUITAR_WT:
+    case FORTNITE_GUITAR:
+    case FORTNITE_GUITAR_STRUM:
+        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+        caps->device_type = gh_guitar;
+        TRACE("Santroller 2 gh guitar detected!\n");
+        break;
+    case ROCK_BAND_GUITAR:
+        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR;
+        caps->device_type = rb_guitar;
+        TRACE("Santroller 2 rb guitar detected!\n");
+        if (override_rb)
+        {
+            printf("Overriding RB guitar subtype with GH guitar subtype\n");
+            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+        }
+        break;
+    case GUITAR_HERO_DRUMS:
+    case FORTNITE_DRUMS:
+        caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
+        caps->device_type = gh_drum;
+        TRACE("Santroller 2 gh drum detected!\n");
+        break;
+    case ROCK_BAND_DRUMS:
+        caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
+        caps->device_type = rb_drum;
+        TRACE("Santroller 2 rb drum detected!\n");
+        break;
+    case LIVE_GUITAR:
+        caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+        caps->device_type = live_guitar;
+        TRACE("Santroller 2 live guitar detected!\n");
+        break;
+    case DJ_HERO_TURNTABLE:
+        caps->subtype = XINPUT_DEVSUBTYPE_TURNTABLE;
+        caps->device_type = turntable;
+        TRACE("Santroller 2 turntable detected!\n");
+        break;
+    case ROCK_BAND_PRO_KEYS:
+        caps->subtype = XINPUT_DEVSUBTYPE_PRO_KEYS;
+        caps->device_type = pro_keys;
+        TRACE("Santroller 2 pro keys detected!\n");
+        break;
+    case ROCK_BAND_PRO_GUITAR_MUSTANG:
+        caps->subtype = XINPUT_DEVSUBTYPE_PRO_GUITAR;
+        caps->device_type = pro_guitar_mustang;
+        TRACE("Santroller 2 pro guitar mustang detected!\n");
+        break;
+    case ROCK_BAND_PRO_GUITAR_SQUIRE:
+        caps->subtype = XINPUT_DEVSUBTYPE_PRO_GUITAR;
+        caps->device_type = pro_guitar_squire;
+        TRACE("Santroller 2 pro guitar squire detected!\n");
+        break;
+    case TAIKO:
+        caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
+        caps->device_type = gh_drum;
+        TRACE("Santroller 2 taiko detected!\n");
+        break;
+    case ARCADE:
+        caps->subtype = XINPUT_DEVSUBTYPE_ARCADE_PAD;
+        caps->device_type = gamepad;
+        TRACE("Santroller 2 arcade detected!\n");
+        break;
+    default:
+        caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
+        caps->device_type = gamepad;
+        TRACE("Santroller 2 subtype %d detected!\n", sub_type);
+        break;
+    }
+}
+
+// serial and sibling (how many devices with the same VID, PID and serial came before this one) pick the interface on
+// composite devices when we have to look at its USB descriptors
+static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revision, hid_device *device, const wchar_t *serial, int sibling)
+{
+    if (vidpid == MAKELONG(0x1209, 0x2882) && !(device && IsVendorHidRaw(0x1209)))
+    {
+        // the version Wine gives us is bcdHID, not the bcdDevice the device type is in
+        uint16_t bcd_device;
+        if (sysfs_read_bcd_device(0x1209, 0x2882, serial, serial && serial[0] ? 0 : sibling, &bcd_device))
+            revision = bcd_device;
+    }
     int i;
     HRESULT hr;
     static const unsigned long wireless_products[] = {
@@ -1067,10 +1548,13 @@ static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revis
     caps->vid = LOWORD(vidpid);
     caps->pid = HIWORD(vidpid);
     if (vidpid == MAKELONG(0x1209, 0x2883)) {
-        GetSubtypeOverride("santroller", "santroller_subtype", &caps->subtype, &caps->device_type);
+        // a gamepad until the device (or its USB descriptors) says otherwise
+        caps->device_type = gamepad;
         caps->console_type = santroller_2;
-        // Only query features when we own the HID handle; XInput-proxied devices already report their subtype
-        hid_device *query_dev = device;
+        // Only query features when we own the HID handle; XInput-proxied devices already report their subtype.
+        // Wine's SDL backend can't pass feature requests on, so read the descriptors from sysfs there instead.
+        bool identified = false;
+        hid_device *query_dev = device && IsVendorHidRaw(0x1209) ? device : NULL;
         if (query_dev) {
             int written = 0;
             const uint8_t featuresGetCommand[SANTROLLER_DEVICE_FEATURES_SET_REPORT_SIZE] = { SANTROLLER_DEVICE_REPORT_ID_FEATURES, 0 };
@@ -1093,103 +1577,16 @@ static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revis
                         continue;
                     }
                     if (read == SANTROLLER_DEVICE_FEATURES_GET_REPORT_SIZE && data[0] == SANTROLLER_DEVICE_REPORT_ID_FEATURES) {
-                        uint8_t sub_type = data[1];
-                        uint8_t capabilities = data[2];
-
-                        caps->dpad_as_buttons = (capabilities & SANTROLLER_DEVICE_CAPABILITY_DPAD_AS_BUTTONS) != 0;
-                        caps->y_axis_inverted = (sub_type == GAMEPAD) && ((capabilities & SANTROLLER_DEVICE_CAPABILITY_Y_AXIS_INVERTED) != 0);
-
-                        switch (sub_type) {
-                        case STAGE_KIT:
-                            caps->subtype = XINPUT_DEVSUBTYPE_STAGE_KIT;
-                            caps->device_type = stage_kit;
-                            TRACE("Santroller 2 stage kit detected!\n");
-                            break;
-                        case GAMEPAD:
-                            caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
-                            caps->device_type = gamepad;
-                            TRACE("Santroller 2 gamepad detected!\n");
-                            break;
-                        case DANCE_PAD:
-                            caps->subtype = XINPUT_DEVSUBTYPE_DANCE_PAD;
-                            caps->device_type = gamepad;
-                            TRACE("Santroller 2 dance pad detected!\n");
-                            break;
-                        case GUITAR_HERO_GUITAR:
-                        case GUITAR_HERO_GUITAR_WT:
-                        case FORTNITE_GUITAR:
-                        case FORTNITE_GUITAR_STRUM:
-                            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-                            caps->device_type = gh_guitar;
-                            TRACE("Santroller 2 gh guitar detected!\n");
-                            break;
-                        case ROCK_BAND_GUITAR:
-                            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR;
-                            caps->device_type = rb_guitar;
-                            TRACE("Santroller 2 rb guitar detected!\n");
-                            if (override_rb)
-                            {
-                                printf("Overriding RB guitar subtype with GH guitar subtype\n");
-                                caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-                            }
-                            break;
-                        case GUITAR_HERO_DRUMS:
-                        case FORTNITE_DRUMS:
-                            caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
-                            caps->device_type = gh_drum;
-                            TRACE("Santroller 2 gh drum detected!\n");
-                            break;
-                        case ROCK_BAND_DRUMS:
-                            caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
-                            caps->device_type = rb_drum;
-                            TRACE("Santroller 2 rb drum detected!\n");
-                            break;
-                        case LIVE_GUITAR:
-                            caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-                            caps->device_type = live_guitar;
-                            TRACE("Santroller 2 live guitar detected!\n");
-                            break;
-                        case DJ_HERO_TURNTABLE:
-                            caps->subtype = XINPUT_DEVSUBTYPE_TURNTABLE;
-                            caps->device_type = turntable;
-                            TRACE("Santroller 2 turntable detected!\n");
-                            break;
-                        case ROCK_BAND_PRO_KEYS:
-                            caps->subtype = XINPUT_DEVSUBTYPE_PRO_KEYS;
-                            caps->device_type = pro_keys;
-                            TRACE("Santroller 2 pro keys detected!\n");
-                            break;
-                        case ROCK_BAND_PRO_GUITAR_MUSTANG:
-                            caps->subtype = XINPUT_DEVSUBTYPE_PRO_GUITAR;
-                            caps->device_type = pro_guitar_mustang;
-                            TRACE("Santroller 2 pro guitar mustang detected!\n");
-                            break;
-                        case ROCK_BAND_PRO_GUITAR_SQUIRE:
-                            caps->subtype = XINPUT_DEVSUBTYPE_PRO_GUITAR;
-                            caps->device_type = pro_guitar_squire;
-                            TRACE("Santroller 2 pro guitar squire detected!\n");
-                            break;
-                        case TAIKO:
-                            caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
-                            caps->device_type = gh_drum;
-                            TRACE("Santroller 2 taiko detected!\n");
-                            break;
-                        case ARCADE:
-                            caps->subtype = XINPUT_DEVSUBTYPE_ARCADE_PAD;
-                            caps->device_type = gamepad;
-                            TRACE("Santroller 2 arcade detected!\n");
-                            break;
-                        default:
-                            caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
-                            caps->device_type = gamepad;
-                            TRACE("Santroller 2 subtype %d detected!\n", sub_type);
-                            break;
-                        }
+                        santroller2_apply_identity(caps, data[1], data[2]);
+                        identified = true;
                         break;
                     }
                 }
             }
         }
+        uint8_t sub_type, capabilities;
+        if (!identified && device && sysfs_read_identity(0x1209, 0x2883, serial, sibling, false, &sub_type, &capabilities))
+            santroller2_apply_identity(caps, sub_type, capabilities);
     }
     if (vidpid == MAKELONG(0x1209, 0x2882))
     {
@@ -1501,6 +1898,44 @@ static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revis
     }
 }
 
+// Wine numbers devices from its SDL backend in the order SDL found them, which follows the USB interfaces. The first one
+// with a given serial gets the serial as its instance ID, later ones get "1&hash&0&index". -1 for the first, INT_MAX
+// when it can't be worked out.
+static int wine_bus_index(const char *path)
+{
+    const char *start = strstr(path, "HID#");
+    if (!start)
+        return INT_MAX;
+    CHAR id[MAX_DEVICE_ID_LEN];
+    int length = 0;
+    for (; *start && *start != '{' && length < MAX_DEVICE_ID_LEN - 1; start++)
+        id[length++] = *start == '#' ? '\\' : *start;
+    if (length && id[length - 1] == '\\')
+        length--;
+    id[length] = '\0';
+    DEVINST instance, parent;
+    if (CM_Locate_DevNodeA(&instance, id, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS)
+        return INT_MAX;
+    while (CM_Get_Parent(&parent, instance, 0) == CR_SUCCESS)
+    {
+        if (CM_Get_Device_IDA(parent, id, sizeof(id), 0) != CR_SUCCESS)
+            return INT_MAX;
+        if (!strncmp(id, "WINEBUS\\", 8))
+        {
+            const char *last = strrchr(id, '\\');
+            if (strncmp(last + 1, "1&", 2) != 0)
+                return -1;
+            const char *index = strrchr(last, '&');
+            return (int)strtol(index + 1, NULL, 16);
+        }
+        instance = parent;
+    }
+    return INT_MAX;
+}
+
+// the whole enumeration, so print_device can rank a device against the others like it
+static struct hid_device_info *enumeration_head;
+
 void print_device(struct hid_device_info *cur_dev)
 {
     printf("Device Found\n  type: %04hx %04hx\n  path: %s\n  serial_number: %ls", cur_dev->vendor_id, cur_dev->product_id, cur_dev->path, cur_dev->serial_number);
@@ -1516,14 +1951,58 @@ void print_device(struct hid_device_info *cur_dev)
         return;
     controllers[dinput.mapped].xinput_index = -1;
     controllers[dinput.mapped].connected = TRUE;
+    controllers[dinput.mapped].caps.wine_gamepad = FALSE;
     controllers[dinput.mapped].device = hid_open_path(cur_dev->path);
     hid_device *device = controllers[dinput.mapped].device;
     hid_set_nonblocking(device, 1);
-    dinput_fill_caps(&controllers[dinput.mapped].caps, MAKELONG(cur_dev->vendor_id, cur_dev->product_id), cur_dev->release_number, device);
+    wcsncpy(controllers[dinput.mapped].serial, cur_dev->serial_number ? cur_dev->serial_number : L"", 127);
+    controllers[dinput.mapped].serial[127] = L'\0';
+    int sibling = 0;
+    for (int i = 0; i < dinput.mapped; i++)
+    {
+        if (controllers[i].xinput_index == -1 && controllers[i].caps.vid == cur_dev->vendor_id && controllers[i].caps.pid == cur_dev->product_id &&
+            wcscmp(controllers[i].serial, controllers[dinput.mapped].serial) == 0)
+            sibling++;
+    }
+    if (IsWine() && cur_dev->vendor_id == 0x1209 && cur_dev->product_id == 0x2883)
+    {
+        // the enumeration order has nothing to do with the interfaces, rank by Wine's own numbering instead
+        int own = wine_bus_index(cur_dev->path);
+        if (own != INT_MAX)
+        {
+            sibling = 0;
+            for (struct hid_device_info *other = enumeration_head; other; other = other->next)
+            {
+                if (other != cur_dev && other->vendor_id == cur_dev->vendor_id && other->product_id == cur_dev->product_id &&
+                    wcscmp(other->serial_number ? other->serial_number : L"", controllers[dinput.mapped].serial) == 0 &&
+                    wine_bus_index(other->path) < own)
+                    sibling++;
+            }
+        }
+        TRACE("Santroller 2 is Wine device %d, interface %d\n", own, sibling);
+    }
+    dinput_fill_caps(&controllers[dinput.mapped].caps, MAKELONG(cur_dev->vendor_id, cur_dev->product_id), cur_dev->release_number, device,
+                     controllers[dinput.mapped].serial, sibling);
+    if (controllers[dinput.mapped].caps.console_type == linux_sdl && strstr(cur_dev->path, "IG_") &&
+        cur_dev->vendor_id == 0x1209 && cur_dev->product_id == 0x2883)
+    {
+        // Wine gave it its XInput gamepad layout (it's an SDL game controller), read it like Wine's XInput would
+        controllers[dinput.mapped].caps.console_type = generic_hid;
+        controllers[dinput.mapped].caps.wine_gamepad = TRUE;
+    }
     if (controllers[dinput.mapped].caps.console_type == generic_hid && !generic_hid_open(&controllers[dinput.mapped], cur_dev->path))
     {
         TRACE("Unable to read %04hx:%04hx as a generic gamepad, it will not report any input\n", cur_dev->vendor_id, cur_dev->product_id);
         controllers[dinput.mapped].caps.console_type = xinput;
+    }
+    if (controllers[dinput.mapped].caps.ps2needschecking)
+    {
+        // work out what is plugged into a PS2 adapter now, so the game sees the right subtype from the start
+        uint8_t report[GENERIC_HID_MAX_REPORT];
+        int size = hid_read_timeout(device, report, sizeof(report), 500);
+        ps2_adapter_check(&controllers[dinput.mapped], report, size);
+        if (controllers[dinput.mapped].caps.ps2needschecking)
+            TRACE("No report from the PS2 adapter yet, checking it on the first one\n");
     }
 
     if (controllers[dinput.mapped].caps.console_type == raphnet_wii || controllers[dinput.mapped].caps.console_type == raphnet_ps2)
@@ -1583,11 +2062,19 @@ void print_devices(struct hid_device_info *cur_dev)
     }
 }
 
+// Santroller 2 interfaces are gamepads to Wine, so its XInput would have them, but it can't tell them apart.
+// Read them ourselves instead.
+static bool wine_read_directly(uint16_t vid, uint16_t pid)
+{
+    return IsWine() && vid == 0x1209 && pid == 0x2883;
+}
+
 void print_devices_with_descriptor(struct hid_device_info *cur_dev)
 {
+    enumeration_head = cur_dev;
     for (; cur_dev; cur_dev = cur_dev->next)
     {
-        if (strstr(cur_dev->path, "IG_"))
+        if (strstr(cur_dev->path, "IG_") && !wine_read_directly(cur_dev->vendor_id, cur_dev->product_id))
         {
             printf("found xinput, skipping\n");
             continue;
@@ -1731,18 +2218,7 @@ static void dinput_update(int index)
             if (!controllers[index].caps.ps3thirdparty)
             {
                 PS3Gamepad_Data_t *report = (PS3Gamepad_Data_t *)data;
-                if (controllers[index].caps.ps2needschecking)
-                {
-                    controllers[index].caps.ps2needschecking = false;
-
-                    if (report->dpadLeft)
-                    {
-                        controllers[index].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
-                        controllers[index].caps.device_type = gh_guitar;
-                        TRACE("Setting subtype to guitar!\n");
-                        TRACE("PS2 guitar detected!\n");
-                    }
-                }
+                ps2_adapter_check(&controllers[index], data, size);
                 if (controllers[index].caps.device_type == gamepad)
                 {
                     if (report->a)
@@ -2613,6 +3089,7 @@ static void dinput_update(int index)
         }
         if (controllers[index].caps.console_type == generic_hid && controllers[index].generic)
         {
+            ps2_adapter_check(&controllers[index], data, size);
             generic_hid_update(controllers[index].generic, data, size, &gamepad_state);
         }
         if (controllers[index].caps.console_type == linux_sdl)
@@ -3280,16 +3757,56 @@ static void dinput_start(void)
         if (NULL != ProcXInputGetState && NULL != ProcXInputGetCapabilitiesEx && hasEx)
         {
             TRACE("found procs ex\r\n");
+            if (IsWine())
+            {
+                // Wine adds its devices one at a time once something first asks for them (about 25ms apart), wait for
+                // the count to settle so composite devices don't lose interfaces that turned up late
+                DWORD start = GetTickCount(), stable_since = start;
+                int last = -1;
+                while (GetTickCount() - start < 2000 && GetTickCount() - stable_since < 250)
+                {
+                    int count = 0;
+                    for (int i = 0; i < 4; i++)
+                    {
+                        XINPUT_CAPABILITIES_EX probe;
+                        if ((ProcXInputGetCapabilitiesEx)(1, i, 0, &probe) != ERROR_DEVICE_NOT_CONNECTED)
+                            count++;
+                    }
+                    if (count != last)
+                    {
+                        last = count;
+                        stable_since = GetTickCount();
+                    }
+                    Sleep(20);
+                }
+                TRACE("Wine has %d xinput devices after %lums\n", last, GetTickCount() - start);
+            }
             for (int i = 0; i < 4; i++)
             {
                 XINPUT_CAPABILITIES_EX caps2;
                 if ((ProcXInputGetCapabilitiesEx)(1, i, 0, &caps2) != ERROR_DEVICE_NOT_CONNECTED)
                 {
+                    if (wine_read_directly(caps2.VendorId, caps2.ProductId))
+                    {
+                        TRACE("xinput vid: %04x, pid: %04x, reading it as HID instead\n", caps2.VendorId, caps2.ProductId);
+                        continue;
+                    }
                     TRACE("xinput vid: %04x, pid: %04x, subtype: %02x!\n", caps2.VendorId, caps2.ProductId, caps2.Capabilities.SubType);
                     TRACE("found xinput device, proxying\r\n");
+                    int sibling = 0;
+                    for (int j = 0; j < dinput.mapped; j++)
+                    {
+                        if (controllers[j].xinput_index != -1 && controllers[j].caps.vid == caps2.VendorId && controllers[j].caps.pid == caps2.ProductId)
+                            sibling++;
+                    }
                     controllers[dinput.mapped].xinput_index = i;
                     controllers[dinput.mapped].connected = TRUE;
-                    dinput_fill_caps(&controllers[dinput.mapped].caps, MAKELONG(caps2.VendorId, caps2.ProductId), caps2.VersionNumber, NULL);
+                    dinput_fill_caps(&controllers[dinput.mapped].caps, MAKELONG(caps2.VendorId, caps2.ProductId), caps2.VersionNumber, NULL, NULL, sibling);
+                    // Wine's XInput calls everything a gamepad, the real subtype is in the XInput vendor descriptor
+                    uint8_t descriptor_subtype, descriptor_capabilities;
+                    if (caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GAMEPAD &&
+                             sysfs_read_identity(caps2.VendorId, caps2.ProductId, NULL, sibling, true, &descriptor_subtype, &descriptor_capabilities))
+                        caps2.Capabilities.SubType = descriptor_subtype;
                     // fill_caps defaults unknown devices to gamepad, so trust the subtype XInput reported unless it's a plain gamepad
                     if (caps2.Capabilities.SubType != XINPUT_DEVSUBTYPE_GAMEPAD)
                         controllers[dinput.mapped].caps.subtype = caps2.Capabilities.SubType;
@@ -3627,6 +4144,9 @@ DWORD dumb_XInputGetCapabilities(DWORD index, DWORD flags,
         }
         return ret;
     }
+
+    if (controllers[index].caps.ps2needschecking)
+        return ERROR_DEVICE_NOT_CONNECTED;
 
     capabilities->Type = XINPUT_DEVTYPE_GAMEPAD;
 
