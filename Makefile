@@ -1,5 +1,5 @@
 # Important stuff
-CFLAGS = 
+CFLAGS = -static-libgcc
 LIBS = -luuid -ldxguid -ldinput -ldinput8 -lhid -lcfgmgr32 -lwbemuuid -lole32 -loleaut32 -lhidapi
 
 # (maybe) distro-specific stuff
