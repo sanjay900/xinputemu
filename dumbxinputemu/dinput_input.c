@@ -1467,9 +1467,11 @@ static void santroller2_apply_identity(struct CapsFlags *caps, uint8_t sub_type,
 // composite devices when we have to look at its USB descriptors
 static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revision, hid_device *device, const wchar_t *serial, int sibling)
 {
-    if (vidpid == MAKELONG(0x1209, 0x2882) && !(device && IsVendorHidRaw(0x1209)))
+    // over USB, Wine's SDL backend gives us bcdHID (0x0101, 0x0111) instead of the bcdDevice the device type is in.
+    // Over Bluetooth the version is the PnP ID / Device ID version, which the firmware fills in like bcdDevice
+    // (type << 8, low byte 0), and there's no USB device to look up, so only go to sysfs when it looks like bcdHID
+    if (vidpid == MAKELONG(0x1209, 0x2882) && (revision & 0xFF) && !(device && IsVendorHidRaw(0x1209)))
     {
-        // the version Wine gives us is bcdHID, not the bcdDevice the device type is in
         uint16_t bcd_device;
         if (sysfs_read_bcd_device(0x1209, 0x2882, serial, serial && serial[0] ? 0 : sibling, &bcd_device))
             revision = bcd_device;
@@ -1585,8 +1587,16 @@ static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revis
             }
         }
         uint8_t sub_type, capabilities;
-        if (!identified && device && sysfs_read_identity(0x1209, 0x2883, serial, sibling, false, &sub_type, &capabilities))
+        if (!identified && device && sysfs_read_identity(0x1209, 0x2883, serial, sibling, false, &sub_type, &capabilities)) {
             santroller2_apply_identity(caps, sub_type, capabilities);
+            identified = true;
+        }
+        // over Bluetooth there are no USB descriptors, but the PnP ID version is subtype << 8 | capabilities.
+        // Over USB the version is bcdDevice (or bcdHID under Wine), which one of the above will have beaten
+        if (!identified && device && (revision >> 8)) {
+            TRACE("Santroller 2 identified from its version %04x\n", revision);
+            santroller2_apply_identity(caps, revision >> 8, revision & 0xFF);
+        }
     }
     if (vidpid == MAKELONG(0x1209, 0x2882))
     {
@@ -1596,21 +1606,25 @@ static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revis
         case STAGE_KIT:
             caps->subtype = XINPUT_DEVSUBTYPE_STAGE_KIT;
             caps->device_type = stage_kit;
+            caps->console_type = santroller;
             TRACE("Santroller hid stage kit detected!\n");
             break;
         case GAMEPAD:
             caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
             caps->device_type = gamepad;
+            caps->console_type = santroller;
             TRACE("Santroller hid gamepad detected!\n");
             break;
         case GUITAR_HERO_GUITAR:
             caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
             caps->device_type = gh_guitar;
+            caps->console_type = santroller;
             TRACE("Santroller hid gh guitar detected!\n");
             break;
         case ROCK_BAND_GUITAR:
             caps->subtype = XINPUT_DEVSUBTYPE_GUITAR;
             caps->device_type = rb_guitar;
+            caps->console_type = santroller;
             TRACE("Santroller hid rb guitar detected!\n");
             if (override_rb)
             {
@@ -1621,36 +1635,43 @@ static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revis
         case GUITAR_HERO_DRUMS:
             caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
             caps->device_type = gh_drum;
+            caps->console_type = santroller;
             TRACE("Santroller hid gh drum detected!\n");
             break;
         case ROCK_BAND_DRUMS:
             caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
             caps->device_type = rb_drum;
+            caps->console_type = santroller;
             TRACE("Santroller hid rb drum detected!\n");
             break;
         case LIVE_GUITAR:
             caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
             caps->device_type = live_guitar;
+            caps->console_type = santroller;
             TRACE("Santroller hid live guitar detected!\n");
             break;
         case DJ_HERO_TURNTABLE:
             caps->subtype = DJ_HERO_TURNTABLE;
             caps->device_type = turntable;
+            caps->console_type = santroller;
             TRACE("Santroller hid turntable detected!\n");
             break;
         case ROCK_BAND_PRO_KEYS:
             caps->subtype = XINPUT_DEVSUBTYPE_PRO_KEYS;
             caps->device_type = pro_keys;
+            caps->console_type = santroller;
             TRACE("Santroller hid pro keys detected!\n");
             break;
         case ROCK_BAND_PRO_GUITAR_MUSTANG:
             caps->subtype = XINPUT_DEVSUBTYPE_PRO_GUITAR;
             caps->device_type = pro_guitar_mustang;
+            caps->console_type = santroller;
             TRACE("Santroller hid pro guitar mustang detected!\n");
             break;
         case ROCK_BAND_PRO_GUITAR_SQUIRE:
             caps->subtype = XINPUT_DEVSUBTYPE_PRO_GUITAR;
             caps->device_type = pro_guitar_squire;
+            caps->console_type = santroller;
             TRACE("Santroller hid pro guitar squire detected!\n");
             break;
         }
