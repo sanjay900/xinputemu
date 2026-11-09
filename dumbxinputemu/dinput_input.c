@@ -40,7 +40,8 @@ typedef enum
     xbox360,
     santroller_2,
     linux_sdl,
-    xbox_one
+    xbox_one,
+    generic_hid
 } console_type_t;
 #define DIRECTINPUT_VERSION 0x0800
 #define DEBUG
@@ -82,6 +83,51 @@ typedef enum
 #define LEFT 1 << 2
 #define RIGHT 1 << 3
 static const uint8_t dpad_bindings_reverse[] = {UP, UP | RIGHT, RIGHT, DOWN | RIGHT, DOWN, DOWN | LEFT, LEFT, UP | LEFT};
+// Largest input report read from a HID device, generic gamepads are parsed using their descriptor so can be any size
+#define GENERIC_HID_MAX_REPORT 512
+#define GENERIC_HID_MAX_BUTTONS 32
+// Not real XInput buttons, a digital trigger press for pads without analog triggers
+#define GENERIC_BUTTON_LT 0x10000
+#define GENERIC_BUTTON_RT 0x20000
+#ifndef HID_USAGE_SIMULATION_ACCELERATOR
+#define HID_USAGE_SIMULATION_ACCELERATOR ((USAGE)0xC4)
+#endif
+#ifndef HID_USAGE_SIMULATION_BRAKE
+#define HID_USAGE_SIMULATION_BRAKE ((USAGE)0xC5)
+#endif
+
+typedef enum
+{
+    generic_lx,
+    generic_ly,
+    generic_rx,
+    generic_ry,
+    generic_lt,
+    generic_rt,
+    // one axis for both triggers, like DirectInput gives Xbox 360 controllers
+    generic_combined_triggers,
+    generic_hat,
+    generic_value_count
+} generic_value_role_t;
+
+typedef struct
+{
+    BOOL present;
+    USAGE page, usage;
+    LONG min, max;
+    USHORT bits;
+} generic_value_t;
+
+struct GenericHid
+{
+    PHIDP_PREPARSED_DATA preparsed;
+    USHORT report_length;
+    // the input report holding the gamepad's controls, 0 when the device doesn't use report IDs
+    UCHAR report_id;
+    generic_value_t values[generic_value_count];
+    uint32_t button_map[GENERIC_HID_MAX_BUTTONS];
+};
+
 struct CapsFlags
 {
     BOOL wireless, jedi, pov, windows, macos, sdl, ps2needschecking, ps3thirdparty, dpad_as_buttons, y_axis_inverted;
@@ -103,6 +149,7 @@ static struct ControllerMap
     time_t last_poke;
     uint64_t gip_device_id;
     uint8_t gip_last_sequence;
+    struct GenericHid *generic;
 } controllers[XUSER_MAX_COUNT];
 
 static struct
@@ -386,6 +433,553 @@ const char *hid_bus_name(hid_bus_type bus_type)
     return HidBusTypeName[bus_type];
 }
 
+#define SONY_VID 0x054c
+#define SONY_DS3_PID 0x0268
+#define SONY_DS4_PID_1 0x05c4
+#define SONY_DS4_PID_2 0x09cc
+#define SONY_DS4_PID_3 0x0ba0
+#define SONY_DS5_PID 0x0ce6
+#define SONY_DS5_EDGE_PID 0x0df2
+#define REDOCTANE_XBOX_VID 0x1430
+#define PS4_GHLIVE_DONGLE_PID 0x07bb
+
+#define PS_USAGE_PS3 0x01
+#define PS_USAGE_PS4 0x02
+#define PS_USAGE_PS5 0x04
+
+// PlayStation sticks rest at 0x80, with Y going down; XInput wants Y going up
+static inline SHORT ps_axis(uint8_t value)
+{
+    return (SHORT)(value * 257 - 32768);
+}
+
+static inline SHORT ps_axis_inverted(uint8_t value)
+{
+    return ps_axis(UINT8_MAX - value);
+}
+
+// The PS3 (third party), PS4 and PS5 gamepad reports share field names, only their layout differs.
+// The d-pad is a hat in all of them, so it is passed in already decoded.
+#define PS_FILL_GAMEPAD(gamepad, report, up, down, left, right)              \
+    do                                                                       \
+    {                                                                        \
+        if ((report)->a)                                                     \
+            (gamepad).wButtons |= XINPUT_GAMEPAD_A;                          \
+        if ((report)->b)                                                     \
+            (gamepad).wButtons |= XINPUT_GAMEPAD_B;                          \
+        if ((report)->x)                                                     \
+            (gamepad).wButtons |= XINPUT_GAMEPAD_X;                          \
+        if ((report)->y)                                                     \
+            (gamepad).wButtons |= XINPUT_GAMEPAD_Y;                          \
+        if ((report)->leftShoulder)                                          \
+            (gamepad).wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;              \
+        if ((report)->rightShoulder)                                         \
+            (gamepad).wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;             \
+        if ((report)->leftThumbClick)                                        \
+            (gamepad).wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;                 \
+        if ((report)->rightThumbClick)                                       \
+            (gamepad).wButtons |= XINPUT_GAMEPAD_RIGHT_THUMB;                \
+        if ((report)->start)                                                 \
+            (gamepad).wButtons |= XINPUT_GAMEPAD_START;                      \
+        if ((report)->back)                                                  \
+            (gamepad).wButtons |= XINPUT_GAMEPAD_BACK;                       \
+        if ((report)->guide)                                                 \
+            (gamepad).wButtons |= XINPUT_GAMEPAD_GUIDE;                      \
+        if (up)                                                              \
+            (gamepad).wButtons |= XINPUT_GAMEPAD_DPAD_UP;                    \
+        if (down)                                                            \
+            (gamepad).wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;                  \
+        if (left)                                                            \
+            (gamepad).wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;                  \
+        if (right)                                                           \
+            (gamepad).wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;                 \
+        (gamepad).bLeftTrigger = (report)->leftTrigger;                      \
+        (gamepad).bRightTrigger = (report)->rightTrigger;                    \
+        (gamepad).sThumbLX = ps_axis((report)->leftStickX);                  \
+        (gamepad).sThumbLY = ps_axis_inverted((report)->leftStickY);         \
+        (gamepad).sThumbRX = ps_axis((report)->rightStickX);                 \
+        (gamepad).sThumbRY = ps_axis_inverted((report)->rightStickY);        \
+    } while (0)
+
+// Third party PlayStation controllers declare vendor defined feature reports that consoles look for,
+// the same thing Santroller and SDL use to recognise them without knowing their VID/PID:
+// 0x2621 for PS3, 0x2721 / 0xA783 for PS4 and 0x2821 / 0xA883 for PS5
+static int find_ps_usages(hid_device *device)
+{
+    uint8_t desc[HID_API_MAX_REPORT_DESCRIPTOR_SIZE];
+    int len = hid_get_report_descriptor(device, desc, sizeof(desc));
+    uint32_t usage_page = 0;
+    int pending = 0;
+    int found = 0;
+    int i = 0;
+    while (i < len)
+    {
+        uint8_t prefix = desc[i];
+        if (prefix == 0xFE)
+        {
+            // long item, nothing in it that matters here
+            if (i + 1 >= len)
+                break;
+            i += 3 + desc[i + 1];
+            continue;
+        }
+        int size = prefix & 0x03;
+        if (size == 3)
+            size = 4;
+        if (i + 1 + size > len)
+            break;
+        uint32_t value = 0;
+        for (int j = 0; j < size; j++)
+            value |= (uint32_t)desc[i + 1 + j] << (8 * j);
+        switch (prefix & 0xFC)
+        {
+        case 0x04: // Usage Page
+            usage_page = value;
+            break;
+        case 0x08: // Usage, a 4 byte one carries its own page
+        {
+            uint32_t page = size == 4 ? value >> 16 : usage_page;
+            uint16_t usage = value & 0xFFFF;
+            if (page >= 0xFF00)
+            {
+                if (usage == 0x2621)
+                    pending |= PS_USAGE_PS3;
+                else if (usage == 0x2721 || usage == 0xA783)
+                    pending |= PS_USAGE_PS4;
+                else if (usage == 0x2821 || usage == 0xA883)
+                    pending |= PS_USAGE_PS5;
+            }
+            break;
+        }
+        case 0xB0: // Feature
+            found |= pending;
+            pending = 0;
+            break;
+        case 0x80: // Input
+        case 0x90: // Output
+        case 0xA0: // Collection
+        case 0xC0: // End Collection
+            pending = 0;
+            break;
+        }
+        i += 1 + size;
+    }
+    return found;
+}
+
+// Third party PS4 / PS5 controllers describe what they are in feature report 3, see ps4_parse_capabilities in Santroller
+static bool ps_read_device_type(hid_device *device, console_type_t console, uint8_t *out_device_type)
+{
+    uint8_t data[64] = {0x03};
+    int len = hid_get_feature_report(device, data, sizeof(data));
+    const uint8_t *caps = NULL;
+#define PS_CAPS_MAGIC(b) (console == ps5 ? (b) == 0x28 : ((b) == 0x27 || (b) == 0xA7))
+    if (len >= 6 && PS_CAPS_MAGIC(data[2]))
+        caps = &data[2];
+    else if (len >= 4 && PS_CAPS_MAGIC(data[0]))
+        caps = &data[0];
+    else if (len >= 5 && PS_CAPS_MAGIC(data[1]))
+        caps = &data[1];
+#undef PS_CAPS_MAGIC
+    if (!caps)
+        return false;
+    *out_device_type = caps[3];
+    return true;
+}
+
+static bool detect_playstation_controller(struct CapsFlags *caps, long vidpid, hid_device *device)
+{
+    uint16_t vid = LOWORD(vidpid);
+    uint16_t pid = HIWORD(vidpid);
+    console_type_t console = xinput;
+    bool third_party = false;
+    if (vid == SONY_VID && pid == SONY_DS3_PID)
+        console = ps3;
+    else if (vid == SONY_VID && (pid == SONY_DS4_PID_1 || pid == SONY_DS4_PID_2 || pid == SONY_DS4_PID_3))
+        console = ps4;
+    else if (vid == SONY_VID && (pid == SONY_DS5_PID || pid == SONY_DS5_EDGE_PID))
+        console = ps5;
+    else
+    {
+        int usages = find_ps_usages(device);
+        third_party = true;
+        if (usages & PS_USAGE_PS5)
+            console = ps5;
+        else if (usages & PS_USAGE_PS4)
+            console = ps4;
+        else if (usages & PS_USAGE_PS3)
+            console = ps3;
+    }
+    if (console == xinput)
+        return false;
+
+    caps->console_type = console;
+    caps->device_type = gamepad;
+    caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
+
+    if (console == ps3)
+    {
+        caps->ps3thirdparty = third_party;
+        if (!third_party)
+        {
+            // a DualShock 3 sends nothing until it is told to start reporting
+            uint8_t enable[] = {0xF4, 0x42, 0x0c, 0x00, 0x00};
+            if (hid_send_feature_report(device, enable, sizeof(enable)) < 0)
+                TRACE("Failed to enable DualShock 3 reports: %ls\n", hid_error(device));
+        }
+        TRACE("%s PS3 gamepad detected!\n", third_party ? "Third party" : "DualShock 3");
+        return true;
+    }
+
+    uint8_t ps_device_type = 0x00;
+    if (third_party && ps_read_device_type(device, console, &ps_device_type))
+    {
+        switch (ps_device_type)
+        {
+        case 0x01:
+            if (console == ps4 && vid == REDOCTANE_XBOX_VID && pid == PS4_GHLIVE_DONGLE_PID)
+            {
+                caps->device_type = live_guitar;
+                caps->subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+            }
+            else
+            {
+                caps->device_type = rb_guitar;
+                caps->subtype = override_rb ? XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE : XINPUT_DEVSUBTYPE_GUITAR;
+            }
+            break;
+        case 0x02:
+            caps->device_type = rb_drum;
+            caps->subtype = XINPUT_DEVSUBTYPE_DRUM_KIT;
+            break;
+        default:
+            // wheels, fight sticks and the like still send the standard gamepad report
+            break;
+        }
+    }
+    TRACE("%s %s controller detected (device type %02x)!\n", third_party ? "Third party" : "First party",
+          console == ps4 ? "PS4" : "PS5", ps_device_type);
+    return true;
+}
+
+static const struct
+{
+    const char *name;
+    uint32_t button;
+} generic_button_names[] = {
+    {"a", XINPUT_GAMEPAD_A},
+    {"b", XINPUT_GAMEPAD_B},
+    {"x", XINPUT_GAMEPAD_X},
+    {"y", XINPUT_GAMEPAD_Y},
+    {"lb", XINPUT_GAMEPAD_LEFT_SHOULDER},
+    {"rb", XINPUT_GAMEPAD_RIGHT_SHOULDER},
+    {"lt", GENERIC_BUTTON_LT},
+    {"rt", GENERIC_BUTTON_RT},
+    {"back", XINPUT_GAMEPAD_BACK},
+    {"start", XINPUT_GAMEPAD_START},
+    {"ls", XINPUT_GAMEPAD_LEFT_THUMB},
+    {"rs", XINPUT_GAMEPAD_RIGHT_THUMB},
+    {"guide", XINPUT_GAMEPAD_GUIDE},
+    {"up", XINPUT_GAMEPAD_DPAD_UP},
+    {"down", XINPUT_GAMEPAD_DPAD_DOWN},
+    {"left", XINPUT_GAMEPAD_DPAD_LEFT},
+    {"right", XINPUT_GAMEPAD_DPAD_RIGHT},
+    {"none", 0},
+};
+
+// There is no standard button order for HID gamepads, so this can be changed in input_config.ini, either for
+// every generic gamepad under [generic] or for one under [generic_VVVV_PPPP], e.g.
+// buttons=x,a,b,y,lb,rb,lt,rt,back,start,ls,rs,guide
+// The default is the order DualShock 4 / DualSense style pads (and Logitech pads in DirectInput mode) use:
+// square, cross, circle, triangle, L1, R1, L2, R2, share, options, L3, R3, PS
+// where the first entry is HID button 1
+static void generic_load_button_map(struct GenericHid *generic, uint16_t vid, uint16_t pid)
+{
+    CHAR path[MAX_PATH];
+    CHAR section[32];
+    CHAR map[512];
+    GetCurrentDirectoryA(MAX_PATH, path);
+    strcat(path, "\\input_config.ini");
+    snprintf(section, sizeof(section), "generic_%04x_%04x", vid, pid);
+    GetPrivateProfileStringA(section, "buttons", "", map, sizeof(map), path);
+    if (map[0] == '\0')
+        GetPrivateProfileStringA("generic", "buttons", "x,a,b,y,lb,rb,lt,rt,back,start,ls,rs,guide", map, sizeof(map), path);
+    TRACE("Generic gamepad button map: %s\n", map);
+
+    memset(generic->button_map, 0, sizeof(generic->button_map));
+    int button = 0;
+    char *context = NULL;
+    for (char *token = strtok_r(map, ",", &context); token && button < GENERIC_HID_MAX_BUTTONS; token = strtok_r(NULL, ",", &context), button++)
+    {
+        while (*token == ' ' || *token == '\t')
+            token++;
+        char *end = token + strlen(token);
+        while (end > token && (end[-1] == ' ' || end[-1] == '\t'))
+            *--end = '\0';
+        bool known = false;
+        for (size_t i = 0; i < sizeof(generic_button_names) / sizeof(generic_button_names[0]); i++)
+        {
+            if (strcasecmp(token, generic_button_names[i].name) == 0)
+            {
+                generic->button_map[button] = generic_button_names[i].button;
+                known = true;
+                break;
+            }
+        }
+        if (!known)
+            TRACE("Unknown button '%s' in generic button map, ignoring it\n", token);
+    }
+}
+
+static void generic_set_value(struct GenericHid *generic, generic_value_role_t role, const HIDP_VALUE_CAPS *caps, USAGE usage)
+{
+    generic_value_t *value = &generic->values[role];
+    value->present = TRUE;
+    value->page = caps->UsagePage;
+    value->usage = usage;
+    value->bits = caps->BitSize;
+    value->min = caps->LogicalMin;
+    value->max = caps->LogicalMax;
+    // plenty of descriptors give an unsigned maximum that only fits when read as signed, e.g. 0xFFFF as -1
+    if (value->max <= value->min && value->bits > 0 && value->bits < 32)
+    {
+        value->min = 0;
+        value->max = (LONG)((1UL << value->bits) - 1);
+    }
+}
+
+// Work out which of the device's axes are the sticks and triggers, the same guesses SDL makes for unknown gamepads
+static bool generic_hid_open(struct ControllerMap *controller, const char *path)
+{
+    HANDLE handle = CreateFileA(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (handle == INVALID_HANDLE_VALUE)
+    {
+        TRACE("Generic gamepad: unable to open %s (%lu)\n", path, GetLastError());
+        return false;
+    }
+    PHIDP_PREPARSED_DATA preparsed = NULL;
+    BOOLEAN got_preparsed = HidD_GetPreparsedData(handle, &preparsed);
+    CloseHandle(handle);
+    if (!got_preparsed)
+    {
+        TRACE("Generic gamepad: unable to get preparsed data for %s\n", path);
+        return false;
+    }
+
+    HIDP_CAPS caps;
+    if (HidP_GetCaps(preparsed, &caps) != HIDP_STATUS_SUCCESS || caps.InputReportByteLength > GENERIC_HID_MAX_REPORT)
+    {
+        TRACE("Generic gamepad: unusable input report (%u bytes)\n", caps.InputReportByteLength);
+        HidD_FreePreparsedData(preparsed);
+        return false;
+    }
+
+    struct GenericHid *generic = calloc(1, sizeof(*generic));
+    generic->preparsed = preparsed;
+    generic->report_length = caps.InputReportByteLength;
+
+    USHORT value_count = caps.NumberInputValueCaps;
+    HIDP_VALUE_CAPS *value_caps = calloc(value_count ? value_count : 1, sizeof(*value_caps));
+    if (value_count && HidP_GetValueCaps(HidP_Input, value_caps, &value_count, preparsed) != HIDP_STATUS_SUCCESS)
+        value_count = 0;
+
+    USHORT button_count = caps.NumberInputButtonCaps;
+    HIDP_BUTTON_CAPS *button_caps = calloc(button_count ? button_count : 1, sizeof(*button_caps));
+    if (button_count && HidP_GetButtonCaps(HidP_Input, button_caps, &button_count, preparsed) != HIDP_STATUS_SUCCESS)
+        button_count = 0;
+
+    // Only one input report is read, prefer whichever holds the X axis, otherwise the buttons
+    bool found_report = false;
+    for (USHORT i = 0; i < value_count && !found_report; i++)
+    {
+        USAGE first = value_caps[i].IsRange ? value_caps[i].Range.UsageMin : value_caps[i].NotRange.Usage;
+        USAGE last = value_caps[i].IsRange ? value_caps[i].Range.UsageMax : first;
+        if (value_caps[i].UsagePage == HID_USAGE_PAGE_GENERIC && first <= HID_USAGE_GENERIC_X && last >= HID_USAGE_GENERIC_X)
+        {
+            generic->report_id = value_caps[i].ReportID;
+            found_report = true;
+        }
+    }
+    for (USHORT i = 0; i < button_count && !found_report; i++)
+    {
+        if (button_caps[i].UsagePage == HID_USAGE_PAGE_BUTTON)
+        {
+            generic->report_id = button_caps[i].ReportID;
+            found_report = true;
+        }
+    }
+
+    const HIDP_VALUE_CAPS *axes[0x40] = {0};
+    const HIDP_VALUE_CAPS *accelerator = NULL;
+    const HIDP_VALUE_CAPS *brake = NULL;
+    for (USHORT i = 0; i < value_count; i++)
+    {
+        if (value_caps[i].ReportID != generic->report_id)
+            continue;
+        USAGE first = value_caps[i].IsRange ? value_caps[i].Range.UsageMin : value_caps[i].NotRange.Usage;
+        USAGE last = value_caps[i].IsRange ? value_caps[i].Range.UsageMax : first;
+        for (USAGE usage = first; usage <= last && usage >= first; usage++)
+        {
+            if (value_caps[i].UsagePage == HID_USAGE_PAGE_GENERIC && usage < 0x40 && !axes[usage])
+                axes[usage] = &value_caps[i];
+            if (value_caps[i].UsagePage == HID_USAGE_PAGE_SIMULATION && usage == HID_USAGE_SIMULATION_ACCELERATOR)
+                accelerator = &value_caps[i];
+            if (value_caps[i].UsagePage == HID_USAGE_PAGE_SIMULATION && usage == HID_USAGE_SIMULATION_BRAKE)
+                brake = &value_caps[i];
+        }
+    }
+
+#define GENERIC_AXIS(role, usage)                                      \
+    do                                                                 \
+    {                                                                  \
+        if (axes[usage])                                               \
+            generic_set_value(generic, role, axes[usage], usage);      \
+    } while (0)
+    GENERIC_AXIS(generic_lx, HID_USAGE_GENERIC_X);
+    GENERIC_AXIS(generic_ly, HID_USAGE_GENERIC_Y);
+    GENERIC_AXIS(generic_hat, HID_USAGE_GENERIC_HATSWITCH);
+    if (axes[HID_USAGE_GENERIC_RZ])
+    {
+        // most HID gamepads: right stick on Z / Rz, analog triggers (if any) on Rx / Ry or brake / accelerator
+        GENERIC_AXIS(generic_rx, HID_USAGE_GENERIC_Z);
+        GENERIC_AXIS(generic_ry, HID_USAGE_GENERIC_RZ);
+        GENERIC_AXIS(generic_lt, HID_USAGE_GENERIC_RX);
+        GENERIC_AXIS(generic_rt, HID_USAGE_GENERIC_RY);
+    }
+    else if (axes[HID_USAGE_GENERIC_RX] && axes[HID_USAGE_GENERIC_RY])
+    {
+        // Xbox style: right stick on Rx / Ry and both triggers sharing Z
+        GENERIC_AXIS(generic_rx, HID_USAGE_GENERIC_RX);
+        GENERIC_AXIS(generic_ry, HID_USAGE_GENERIC_RY);
+        GENERIC_AXIS(generic_combined_triggers, HID_USAGE_GENERIC_Z);
+    }
+    else
+    {
+        GENERIC_AXIS(generic_rx, HID_USAGE_GENERIC_Z);
+    }
+#undef GENERIC_AXIS
+    if (brake)
+        generic_set_value(generic, generic_lt, brake, HID_USAGE_SIMULATION_BRAKE);
+    if (accelerator)
+        generic_set_value(generic, generic_rt, accelerator, HID_USAGE_SIMULATION_ACCELERATOR);
+    free(value_caps);
+    free(button_caps);
+
+    generic_load_button_map(generic, controller->caps.vid, controller->caps.pid);
+    controller->generic = generic;
+
+    static const char *role_names[] = {"lx", "ly", "rx", "ry", "lt", "rt", "combined triggers", "hat"};
+    TRACE("Generic gamepad: report %u, %u bytes\n", generic->report_id, generic->report_length);
+    for (int i = 0; i < generic_value_count; i++)
+    {
+        if (generic->values[i].present)
+            TRACE("  %s: page %02x usage %02x (%ld - %ld, %u bits)\n", role_names[i], generic->values[i].page,
+                  generic->values[i].usage, generic->values[i].min, generic->values[i].max, generic->values[i].bits);
+    }
+    return true;
+}
+
+// Reads a value scaled to 0 - 65535, false when it is missing or outside its range (e.g. a centred hat)
+static bool generic_read_value(struct GenericHid *generic, generic_value_role_t role, PCHAR report, uint32_t *out)
+{
+    generic_value_t *value = &generic->values[role];
+    if (!value->present)
+        return false;
+    ULONG raw;
+    if (HidP_GetUsageValue(HidP_Input, value->page, 0, value->usage, &raw, generic->preparsed, report, generic->report_length) != HIDP_STATUS_SUCCESS)
+        return false;
+    LONG signed_value = (LONG)raw;
+    if (value->min < 0 && value->bits > 0 && value->bits < 32 && (raw & (1UL << (value->bits - 1))))
+        signed_value = (LONG)(raw | ~((1UL << value->bits) - 1));
+    if (signed_value < value->min || signed_value > value->max || value->max == value->min)
+        return false;
+    if (role == generic_hat)
+    {
+        // hats aren't scaled, the caller wants the direction
+        *out = (uint32_t)(signed_value - value->min);
+        return true;
+    }
+    *out = (uint32_t)(((int64_t)signed_value - value->min) * 65535 / ((int64_t)value->max - value->min));
+    return true;
+}
+
+static void generic_hid_update(struct GenericHid *generic, const uint8_t *data, int size, XINPUT_GAMEPAD *gamepad)
+{
+    uint8_t report[GENERIC_HID_MAX_REPORT] = {0};
+    if (generic->report_id)
+    {
+        // anything other than the gamepad's report keeps the last state
+        if (data[0] != generic->report_id)
+            return;
+        memcpy(report, data, min(size, generic->report_length));
+    }
+    else
+    {
+        // hidapi drops the 0 report ID windows puts in front of reports from devices without report IDs, but HidP wants it
+        memcpy(report + 1, data, min(size, generic->report_length - 1));
+    }
+
+    uint32_t value;
+    if (generic_read_value(generic, generic_lx, (PCHAR)report, &value))
+        gamepad->sThumbLX = (SHORT)(value - 32768);
+    if (generic_read_value(generic, generic_ly, (PCHAR)report, &value))
+        gamepad->sThumbLY = (SHORT)(32767 - value);
+    if (generic_read_value(generic, generic_rx, (PCHAR)report, &value))
+        gamepad->sThumbRX = (SHORT)(value - 32768);
+    if (generic_read_value(generic, generic_ry, (PCHAR)report, &value))
+        gamepad->sThumbRY = (SHORT)(32767 - value);
+    if (generic_read_value(generic, generic_lt, (PCHAR)report, &value))
+        gamepad->bLeftTrigger = value >> 8;
+    if (generic_read_value(generic, generic_rt, (PCHAR)report, &value))
+        gamepad->bRightTrigger = value >> 8;
+    if (generic_read_value(generic, generic_combined_triggers, (PCHAR)report, &value))
+    {
+        // above the middle is the left trigger, below is the right
+        if (value > 32768)
+            gamepad->bLeftTrigger = (value - 32768) >> 7;
+        else
+            gamepad->bRightTrigger = min((32768 - value) >> 7, 255);
+    }
+
+    if (generic_read_value(generic, generic_hat, (PCHAR)report, &value))
+    {
+        LONG positions = generic->values[generic_hat].max - generic->values[generic_hat].min + 1;
+        // a 4 position hat only has the cardinal directions
+        if (positions == 4)
+            value *= 2;
+        if (value < 8)
+        {
+            uint8_t dpad = dpad_bindings_reverse[value];
+            if (dpad & UP)
+                gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+            if (dpad & DOWN)
+                gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+            if (dpad & LEFT)
+                gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
+            if (dpad & RIGHT)
+                gamepad->wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+        }
+    }
+
+    USAGE usages[128];
+    ULONG usage_count = sizeof(usages) / sizeof(usages[0]);
+    if (HidP_GetUsages(HidP_Input, HID_USAGE_PAGE_BUTTON, 0, usages, &usage_count, generic->preparsed, (PCHAR)report, generic->report_length) == HIDP_STATUS_SUCCESS)
+    {
+        for (ULONG i = 0; i < usage_count; i++)
+        {
+            if (usages[i] < 1 || usages[i] > GENERIC_HID_MAX_BUTTONS)
+                continue;
+            uint32_t button = generic->button_map[usages[i] - 1];
+            if (button == GENERIC_BUTTON_LT)
+                gamepad->bLeftTrigger = 255;
+            else if (button == GENERIC_BUTTON_RT)
+                gamepad->bRightTrigger = 255;
+            else
+                gamepad->wButtons |= (WORD)button;
+        }
+    }
+}
+
 #define SANTROLLER_DEVICE_REPORT_ID_FEATURES        0x10
 #define SANTROLLER_DEVICE_FEATURES_SET_REPORT_SIZE  2
 #define SANTROLLER_DEVICE_FEATURES_GET_REPORT_SIZE  3
@@ -401,7 +995,6 @@ static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revis
 {
     int i;
     HRESULT hr;
-    DIDEVCAPS dinput_caps;
     static const unsigned long wireless_products[] = {
         MAKELONG(0x045e, 0x0291) /* microsoft receiver */,
         MAKELONG(0x045e, 0x02a9) /* microsoft receiver (3rd party) */,
@@ -715,9 +1308,6 @@ static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revis
     }
 
     TRACE("vidpid: %08x\n", vidpid);
-    TRACE("vidpid: %08x\n", vidpid);
-    TRACE("axes: %08x\n", dinput_caps.dwAxes);
-    TRACE("buttons: %08x\n", dinput_caps.dwButtons);
     // only force wireless adapters to act as guitars on linux
     for (i = 0; i < sizeof(wireless_products) / sizeof(wireless_products[0]); i++)
     {
@@ -897,6 +1487,18 @@ static void dinput_fill_caps(struct CapsFlags *caps, long vidpid, uint16_t revis
         TRACE("Configured device %08lx as linux_sdl (axes: %d, buttons: %d, hat: %d)\n",
               vidpid, caps->axes, caps->buttons, caps->pov);
     }
+    else if (device && caps->console_type == xinput)
+    {
+        // nothing above claimed it, see if it is a PlayStation gamepad (or an instrument we don't know the VID/PID of)
+        if (!detect_playstation_controller(caps, vidpid, device))
+        {
+            // read it as a plain HID gamepad, using its report descriptor
+            caps->console_type = generic_hid;
+            caps->device_type = gamepad;
+            caps->subtype = XINPUT_DEVSUBTYPE_GAMEPAD;
+            TRACE("Unrecognised HID device %08lx, treating it as a generic gamepad\n", vidpid);
+        }
+    }
 }
 
 void print_device(struct hid_device_info *cur_dev)
@@ -918,6 +1520,11 @@ void print_device(struct hid_device_info *cur_dev)
     hid_device *device = controllers[dinput.mapped].device;
     hid_set_nonblocking(device, 1);
     dinput_fill_caps(&controllers[dinput.mapped].caps, MAKELONG(cur_dev->vendor_id, cur_dev->product_id), cur_dev->release_number, device);
+    if (controllers[dinput.mapped].caps.console_type == generic_hid && !generic_hid_open(&controllers[dinput.mapped], cur_dev->path))
+    {
+        TRACE("Unable to read %04hx:%04hx as a generic gamepad, it will not report any input\n", cur_dev->vendor_id, cur_dev->product_id);
+        controllers[dinput.mapped].caps.console_type = xinput;
+    }
 
     if (controllers[dinput.mapped].caps.console_type == raphnet_wii || controllers[dinput.mapped].caps.console_type == raphnet_ps2)
     {
@@ -1084,9 +1691,9 @@ static void dinput_update(int index)
                 }
             }
         }
-        uint8_t data[64];
+        uint8_t data[GENERIC_HID_MAX_REPORT];
         int size = hid_read(controllers[index].device, data, sizeof(data));
-        if (!size)
+        if (size <= 0)
         {
             return;
         }
@@ -1162,10 +1769,49 @@ static void dinput_update(int index)
                         gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
                     if (report->back)
                         gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK;
-                    gamepad_state.sThumbLX = (report->leftStickX << 8) - 32767;
-                    gamepad_state.sThumbLY = (report->leftStickY << 8) - 32767;
-                    gamepad_state.sThumbRX = (report->rightStickX << 8) - 32767;
-                    gamepad_state.sThumbRY = (report->rightStickY << 8) - 32767;
+                    if (report->leftThumbClick)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+                    if (report->rightThumbClick)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_RIGHT_THUMB;
+                    if (report->guide)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_GUIDE;
+                    gamepad_state.bLeftTrigger = report->leftTrigger;
+                    gamepad_state.bRightTrigger = report->rightTrigger;
+                    gamepad_state.sThumbLX = ps_axis(report->leftStickX);
+                    gamepad_state.sThumbLY = ps_axis_inverted(report->leftStickY);
+                    gamepad_state.sThumbRX = ps_axis(report->rightStickX);
+                    gamepad_state.sThumbRY = ps_axis_inverted(report->rightStickY);
+                }
+                else if (controllers[index].caps.device_type == gh_guitar)
+                {
+                    // A PS2 guitar through an adapter that copies the PS2 report onto a DS3 one (see PS2GuitarOnPS3_Data_t).
+                    // D-pad left is always held, it is how the guitar identifies itself, so it isn't passed on.
+                    if (report->r2)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_A; // green
+                    if (report->b)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_B; // red (circle)
+                    if (report->y)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_Y; // yellow (triangle)
+                    if (report->a)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_X; // blue (cross)
+                    if (report->x || report->leftShoulder)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER; // orange (square, or L1 on some guitars)
+                    if (report->dpadUp)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_UP; // strum up
+                    if (report->dpadDown)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN; // strum down
+                    if (report->start)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_START;
+                    if (report->back || report->rightShoulder)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_BACK; // select, or the star power pedal (R1)
+                    if (report->guide)
+                        gamepad_state.wButtons |= XINPUT_GAMEPAD_GUIDE;
+
+                    // whammy is the left stick's Y axis, resting at 0x7F and going down to 0x00 when pushed all the way
+                    uint8_t whammy = 0x7F - min(report->leftStickY, 0x7F);
+                    gamepad_state.sThumbRX = (SHORT)(whammy * 65535 / 0x7F - 32768);
+                    // tilt is digital, on L2
+                    gamepad_state.sThumbRY = report->l2 ? 32767 : 0;
                 }
             }
             else
@@ -1178,6 +1824,12 @@ static void dinput_update(int index)
                 bool right = dpad & RIGHT;
                 switch (controllers[index].caps.device_type)
                 {
+                case gamepad:
+                {
+                    PS3ThirdPartyGamepad_Data_t *report = (PS3ThirdPartyGamepad_Data_t *)data;
+                    PS_FILL_GAMEPAD(gamepad_state, report, up, down, left, right);
+                    break;
+                }
                 case live_guitar:
                 {
                     PS3GHLGuitar_Data_t *report = (PS3GHLGuitar_Data_t *)data;
@@ -1747,6 +2399,15 @@ static void dinput_update(int index)
             bool right = dpad & RIGHT;
             switch (caps.device_type)
             {
+            case gamepad:
+            {
+                PS4Gamepad_Data_t *report = (PS4Gamepad_Data_t *)data;
+                // report 1 is the only one with input in it, keep the last state for anything else
+                if (report->report_id != 0x01)
+                    return;
+                PS_FILL_GAMEPAD(gamepad_state, report, up, down, left, right);
+                break;
+            }
             case rb_guitar:
             {
                 PS4RockBandGuitar_Data_t *report = (PS4RockBandGuitar_Data_t *)data;
@@ -1869,6 +2530,15 @@ static void dinput_update(int index)
             bool right = dpad & RIGHT;
             switch (caps.device_type)
             {
+            case gamepad:
+            {
+                PS5Gamepad_Data_t *report = (PS5Gamepad_Data_t *)data;
+                // report 1 is the only one with input in it, keep the last state for anything else
+                if (report->report_id != 0x01)
+                    return;
+                PS_FILL_GAMEPAD(gamepad_state, report, up, down, left, right);
+                break;
+            }
             case rb_guitar:
             {
                 PS5RockBandGuitar_Data_t *report = (PS5RockBandGuitar_Data_t *)data;
@@ -1940,6 +2610,10 @@ static void dinput_update(int index)
                 break;
             }
             }
+        }
+        if (controllers[index].caps.console_type == generic_hid && controllers[index].generic)
+        {
+            generic_hid_update(controllers[index].generic, data, size, &gamepad_state);
         }
         if (controllers[index].caps.console_type == linux_sdl)
         {
