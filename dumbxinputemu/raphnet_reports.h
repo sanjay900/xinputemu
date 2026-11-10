@@ -25,8 +25,8 @@ typedef struct {
     uint16_t whammy;
     uint8_t green : 1;
     uint8_t red : 1;
-    uint8_t yellow : 1;
     uint8_t blue : 1;
+    uint8_t yellow : 1;
     uint8_t orange : 1;
     uint8_t down : 1;
     uint8_t plus : 1;
