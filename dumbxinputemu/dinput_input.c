@@ -283,6 +283,7 @@ static bool ParseSubtype(const char *SubtypeStr, int *out_subtype, device_type_t
         {"gh_guitar", XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE, gh_guitar},
         {"guitar_alternate", XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE, gh_guitar},
         {"rb_guitar", XINPUT_DEVSUBTYPE_GUITAR, rb_guitar},
+        {"rb_guitar_bass", XINPUT_DEVSUBTYPE_GUITAR_BASS, rb_guitar},
         {"drums", XINPUT_DEVSUBTYPE_DRUM_KIT, gh_drum},
         {"drum", XINPUT_DEVSUBTYPE_DRUM_KIT, gh_drum},
         {"gh_drum", XINPUT_DEVSUBTYPE_DRUM_KIT, gh_drum},
@@ -3836,6 +3837,11 @@ static void dinput_start(void)
                     if (caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GUITAR && override_rb)
                     {
                         TRACE("found RB guitar, proxying as GH guitar\r\n");
+                        controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
+                    }
+                    if (caps2.Capabilities.SubType == XINPUT_DEVSUBTYPE_GUITAR_BASS && override_rb)
+                    {
+                        TRACE("found RB bass guitar, proxying as GH guitar\r\n");
                         controllers[dinput.mapped].caps.subtype = XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE;
                     }
                     if (caps2.VendorId == 0x1BAD && caps2.ProductId == 0x0719)
